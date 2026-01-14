@@ -474,6 +474,38 @@ class NodeVisitor:
             tensor_source_node, target_build_node
         )
         dtype = self.get_data_type(tensor, quant_configs)
+        # Sanitize quant_configs to remove any keys that C++ binding doesn't expect
+        # and convert values to compatible types. pybind11 can't handle torch.Tensor
+        # values or numpy arrays for certain keys.
+        if quant_configs:
+            # Keys that the C++ binding expects for different encodings
+            valid_cpp_keys = {
+                # BLOCKWISE_EXPANSION
+                QCOM_AXIS, QCOM_BLOCK_SCALE_OFFSET, QCOM_NUM_BLOCKS_PER_AXIS,
+                QCOM_BLOCK_SCALE_BITWIDTH, QCOM_BLOCK_STORAGE_TYPE, QCOM_BLOCK_SCALES,
+                # AXIS_SCALE_OFFSET / BW_AXIS_SCALE_OFFSET
+                QCOM_SCALE_OFFSET, QCOM_BITWIDTH,
+                # SCALE_OFFSET / BW_SCALE_OFFSET
+                QCOM_SCALE, QCOM_OFFSET,
+            }
+            sanitized_quant_configs = {}
+            for k, v in quant_configs.items():
+                if k not in valid_cpp_keys:
+                    continue
+                if isinstance(v, torch.Tensor):
+                    # Convert to native Python type for scalar or list for arrays
+                    if v.numel() == 1:
+                        sanitized_quant_configs[k] = v.item()
+                    else:
+                        # Convert to list for pybind11 compatibility
+                        sanitized_quant_configs[k] = v.detach().numpy().flatten().tolist()
+                elif isinstance(v, np.ndarray):
+                    # Convert numpy array to list for pybind11 compatibility
+                    sanitized_quant_configs[k] = v.flatten().tolist()
+                else:
+                    sanitized_quant_configs[k] = v
+            quant_configs = sanitized_quant_configs
+
         if isinstance(tensor, torch._subclasses.fake_tensor.FakeTensor):
             tensor_wrapper = PyQnnManager.TensorWrapper(
                 tensor_name,
