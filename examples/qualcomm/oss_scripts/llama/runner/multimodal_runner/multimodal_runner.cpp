@@ -122,6 +122,8 @@ MultimodalRunner<T>::MultimodalRunner(
     decoder_model_version_ = MultimodalDecoderModelVersion::kSmolvlm;
   } else if (decoder_model_version == "internvl3") {
     decoder_model_version_ = MultimodalDecoderModelVersion::kInternvl3;
+  } else if (decoder_model_version == "fastvlm_0_5b") {
+    decoder_model_version_ = MultimodalDecoderModelVersion::kFastvlm;
   } else {
     ET_CHECK_MSG(false, "Unsupported Decoder Model");
   }

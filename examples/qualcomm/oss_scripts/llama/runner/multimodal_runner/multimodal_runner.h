@@ -34,6 +34,7 @@ namespace example {
 enum MultimodalDecoderModelVersion {
   kSmolvlm = 0,
   kInternvl3,
+  kFastvlm,
 };
 
 enum KvBitWidth {

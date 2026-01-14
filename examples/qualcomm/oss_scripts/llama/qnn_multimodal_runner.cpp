@@ -150,6 +150,12 @@ SpecialTokens get_special_tokens(
       tokens.fake_wrap_start = "<img>";
       tokens.fake_wrap_end = "</img>";
       break;
+    case example::MultimodalDecoderModelVersion::kFastvlm: // fastvlm_0_5b
+      tokens.image_token = "<image>";
+      tokens.global_img = "";
+      tokens.fake_wrap_start = "";
+      tokens.fake_wrap_end = "";
+      break;
     default:
       break;
   }
@@ -223,6 +229,17 @@ std::string get_formatted_prompt(
       formatted_prompt.append("\n");
       formatted_prompt.append(prompt);
       formatted_prompt.append("<|im_end|>assistant\n");
+      break;
+    case example::MultimodalDecoderModelVersion::kFastvlm:
+      if (!system_prompt.empty()) {
+        formatted_prompt.append("<|im_start|>system\n");
+        formatted_prompt.append(system_prompt);
+        formatted_prompt.append("<|im_end|>\n");
+      }
+      formatted_prompt.append("<|im_start|>user\n");
+      formatted_prompt.append(specials.image_token);
+      formatted_prompt.append(prompt);
+      formatted_prompt.append("<|im_end|>\n<|im_start|>assistant\n");
       break;
     default:
       ET_CHECK_MSG(false, "unsupported VLM version");
