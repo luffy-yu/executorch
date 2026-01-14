@@ -31,6 +31,11 @@ VLM_SPECIAL_TOKENS = {
         "fake_wrap_start": "<img>",
         "fake_wrap_end": "</img>",
     },
+    "fastvlm_0_5b": {
+        "image_token": "<image>",
+        "fake_wrap_start": "",
+        "fake_wrap_end": "",
+    },
 }
 # TODO: add special tokens Audio-Language Model
 ALM_SPECIAL_TOKENS = {}
@@ -202,15 +207,28 @@ class TokenizerWrapper:
             Formatted prompt string
         """
         if self.decoder_model in VLM_SPECIAL_TOKENS:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ]
+            specials = VLM_SPECIAL_TOKENS[self.decoder_model]
+            # FastVLM (Qwen2-based) uses simple string content with <image> token
+            # Other VLMs may use list format with type dicts
+            if self.decoder_model == "fastvlm_0_5b":
+                # FastVLM uses simple string format: "<image>\nPrompt text"
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"{specials['image_token']}\n{prompt}",
+                    }
+                ]
+            else:
+                # Other VLMs use list format with image/text type dicts
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ]
         elif self.decoder_model in ALM_SPECIAL_TOKENS:
             messages = [
                 {

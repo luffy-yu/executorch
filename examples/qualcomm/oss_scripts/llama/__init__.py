@@ -40,6 +40,9 @@ from executorch.examples.models.smollm3 import (
 from executorch.examples.models.smolvlm import (
     convert_weights as convert_smolvlm_weights,
 )
+from executorch.examples.models.fastvlm import (
+    convert_weights as convert_fastvlm_weights,
+)
 
 from executorch.examples.qualcomm.oss_scripts.llama.decoder_constants import (
     DECODER_MODEL_VERSION,
@@ -47,6 +50,7 @@ from executorch.examples.qualcomm.oss_scripts.llama.decoder_constants import (
 )
 
 from executorch.examples.qualcomm.oss_scripts.llama.encoder.encoder_config import (
+    FastVLMEncoder,
     InternVL3Encoder,
     LateFusionModalityConfig,
     SmolVLMEncoder,
@@ -59,6 +63,7 @@ from executorch.examples.qualcomm.oss_scripts.llama.model.static_llama import (
 
 from executorch.examples.qualcomm.oss_scripts.llama.static_llm_quant_recipe import (
     CodegenQuantRecipe,
+    FastVLMQuantRecipe,
     Gemma3QuantRecipe,
     Gemma_2BQuantRecipe,
     GLM_1_5B_InstructQuantRecipe,
@@ -88,6 +93,7 @@ LLM_VARIANT_ARCHS: Dict[str, LlamaModel] = {
     "gemma3-1b": MultiScopeAwareLlamaModel,
     "smolvlm_500m_instruct": LlamaModelWithoutEmbedding,
     "internvl3_1b": LlamaModelWithoutEmbedding,
+    "fastvlm_0_5b": LlamaModelWithoutEmbedding,
 }
 
 
@@ -534,3 +540,25 @@ class SmolVLM_500M(LLMModelConfig):
     r2 = False
     r3 = False
     quant_recipe = SmolVLMQuantRecipe
+
+
+@register_llm_model(
+    "fastvlm_0_5b",
+    vision_encoder=FastVLMEncoder,
+)
+@dataclass(init=False, frozen=True)
+class FastVLM_0_5B(LLMModelConfig):
+    repo_id: str = "apple/FastVLM-0.5B"
+    params_path: str = os.path.join(
+        BASE_DIR, "../../../models/fastvlm/config/0_5b_config.json"
+    )
+    convert_weights = convert_fastvlm_weights
+    transform_weight = False
+    instruct_model = True
+    num_sharding = 1
+    masked_softmax = True
+    seq_mse_candidates = 0
+    r1 = False
+    r2 = False
+    r3 = False
+    quant_recipe = FastVLMQuantRecipe

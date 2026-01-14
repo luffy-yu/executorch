@@ -661,3 +661,31 @@ class SmolVLMQuantRecipe(StaticLLMQuantRecipe):
             act_observer=MinMaxObserver,
             granularity=QuantGranularity.PER_CHANNEL,
         )
+
+
+class FastVLMQuantRecipe(StaticLLMQuantRecipe):
+    """
+    Quantization recipe for FastVLM text decoder.
+    Based on Qwen2 architecture, using 16a4w quantization.
+    """
+    default_quant_dtype = QuantDtype.use_16a4w
+
+    def __init__(self, verbose: bool = False):
+        super().__init__()
+
+        self.recipe = QuantRecipe(
+            self.default_quant_dtype,
+            False,
+            act_observer=MinMaxObserver,
+            granularity=QuantGranularity.PER_TENSOR,
+            verbose=verbose,
+        ).add_node_target(
+            {
+                torch.ops.aten.conv2d.default,
+            },
+            QuantDtype.use_16a4w_block,
+            False,
+            act_observer=MinMaxObserver,
+            granularity=QuantGranularity.PER_BLOCK,
+            extra_kwargs={"block_size": (1, 16, 1, 1)},
+        )

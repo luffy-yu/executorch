@@ -6504,6 +6504,16 @@ class TestExampleMultimodalityScript(TestQNN):
                 image_path="http://images.cocodataset.org/val2017/000000039769.jpg",  # Two cats lying on a blanket
                 golden_image_feature="cats",
             ),
+            "fastvlm_0_5b": TestExampleMultimodalityScript.VLMSpecs(
+                max_seq_len=256,
+                SM8650=55,  # Estimated, adjust after benchmarking
+                SM8750=60,  # Estimated, adjust after benchmarking
+                encoder_pte_size=150_000_000,  # 150MB (FastViTHD - smaller than SmolVLM)
+                text_embedding_pte_size=150_000_000,  # 150MB (larger vocab: 151,936 vs 49,280)
+                decoder_pte_size=400_000_000,  # 400MB (similar to SmolVLM)
+                image_path="https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg",  # Statue of Liberty
+                golden_image_feature="statue",
+            ),
         }
 
     def test_static_vlm(self):

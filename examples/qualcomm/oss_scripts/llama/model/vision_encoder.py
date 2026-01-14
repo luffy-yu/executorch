@@ -372,3 +372,175 @@ class InternVL3VisionEncoder(torch.nn.Module):
         # Project features through multi-modal projector
         vision_features = self.multi_modal_projector(vision_features)
         return vision_features
+
+
+# FastVLM Vision Encoder - uses FastViTHD + MLP projector
+class FastVLMVisionEncoder(torch.nn.Module):
+    """
+    Vision encoder for FastVLM model.
+    Uses FastViTHD as the vision backbone with MLP projector.
+
+    Architecture:
+    - Vision Tower: FastViTHD (1024x1024 input, outputs 3072-dim features)
+    - Projector: MLP2x with GELU activation (3072 -> 896)
+
+    Note: This implementation loads the vision components from a pretrained
+    FastVLM checkpoint. For QNN backend optimization, dynamic shapes have been
+    removed and the architecture is simplified for static compilation.
+    """
+
+    def __init__(
+        self,
+        config,
+        img_resized_h: int = 1024,
+        img_resized_w: int = 1024,
+        checkpoint_path: str = None,
+    ):
+        super(FastVLMVisionEncoder, self).__init__()
+        self.config = config
+        self.img_resized_h = img_resized_h
+        self.img_resized_w = img_resized_w
+
+        # Vision encoder output dimensions
+        self.vision_hidden_size = 3072  # FastViTHD output dim
+        self.projector_hidden_size = 896  # Text decoder hidden size
+
+        # Import and create FastViT vision tower
+        from .fastvit import fastvithd
+        self.vision_tower = fastvithd(pretrained=False, num_classes=0)
+
+        # Build MLP projector
+        self.mm_projector = self._build_projector()
+
+        # Load weights from checkpoint if provided
+        if checkpoint_path is not None:
+            self._load_from_checkpoint(checkpoint_path)
+
+    def _build_projector(self):
+        """
+        Build the MLP projector (mlp2x_gelu).
+        Projects from vision_hidden_size (3072) to projector_hidden_size (896).
+        """
+        # mlp2x_gelu: Linear -> GELU -> Linear
+        return nn.Sequential(
+            nn.Linear(self.vision_hidden_size, self.projector_hidden_size),
+            nn.GELU(),
+            nn.Linear(self.projector_hidden_size, self.projector_hidden_size),
+        )
+
+    def _load_from_checkpoint(self, checkpoint_path: str):
+        """
+        Load vision tower and projector weights from FastVLM checkpoint.
+
+        This method extracts:
+        - vision_tower.vision_tower.* weights for FastViTHD
+        - mm_projector.* weights for MLP projector
+        """
+        import os
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        # Load checkpoint
+        try:
+            # Try loading safetensors
+            from safetensors.torch import load_file
+            state_dict = load_file(checkpoint_path)
+        except ImportError:
+            # Fallback to regular torch load
+            state_dict = torch.load(checkpoint_path, map_location='cpu')
+
+        # Extract vision tower and projector weights
+        vision_state_dict = {}
+        projector_state_dict = {}
+
+        for key, value in state_dict.items():
+            if 'vision_tower.vision_tower' in key:
+                # Remove 'model.vision_tower.vision_tower.model.' or 'vision_tower.vision_tower.' prefix
+                if key.startswith('model.vision_tower.vision_tower.model.'):
+                    new_key = key[len('model.vision_tower.vision_tower.model.'):]
+                elif key.startswith('vision_tower.vision_tower.model.'):
+                    new_key = key[len('vision_tower.vision_tower.model.'):]
+                elif key.startswith('vision_tower.vision_tower.'):
+                    new_key = key[len('vision_tower.vision_tower.'):]
+                else:
+                    continue
+                vision_state_dict[new_key] = value
+            elif 'mm_projector' in key:
+                # Remove 'model.mm_projector.' or 'mm_projector.' prefix
+                if key.startswith('model.mm_projector.'):
+                    new_key = key[len('model.mm_projector.'):]
+                elif key.startswith('mm_projector.'):
+                    new_key = key[len('mm_projector.'):]
+                else:
+                    continue
+                projector_state_dict[new_key] = value
+
+        # Load vision tower weights
+        if vision_state_dict:
+            missing, unexpected = self.vision_tower.load_state_dict(
+                vision_state_dict, strict=False
+            )
+            if missing:
+                print(f"Warning: Missing keys in vision tower: {len(missing)} keys")
+                print(f"First few: {list(missing)[:5]}")
+            if unexpected:
+                print(f"Warning: Unexpected keys in vision tower: {len(unexpected)} keys")
+                print(f"First few: {list(unexpected)[:5]}")
+        else:
+            print("Warning: No vision tower weights found in checkpoint with prefix 'vision_tower.vision_tower.'")
+
+        # Load projector weights
+        if projector_state_dict:
+            missing, unexpected = self.mm_projector.load_state_dict(
+                projector_state_dict, strict=False
+            )
+            if missing:
+                print(f"Warning: Missing keys in projector: {missing}")
+            if unexpected:
+                print(f"Warning: Unexpected keys in projector: {unexpected}")
+        else:
+            print("Warning: No projector weights found in checkpoint with prefix 'mm_projector.'")
+
+    def preprocess(self, pixel_values: Tuple[torch.FloatTensor]) -> Tuple[torch.Tensor]:
+        """Preprocess pixel values before passing to vision tower."""
+        # For QNN backend, we keep preprocessing minimal
+        return pixel_values
+
+    def get_example_inputs(self):
+        """Get example inputs for tracing."""
+        return (
+            torch.randn(
+                (1, 3, self.img_resized_h, self.img_resized_w), dtype=torch.float32
+            ),
+        )
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+    ):
+        """
+        Forward pass through vision encoder.
+
+        Args:
+            pixel_values: Image tensor of shape (batch_size, 3, 1024, 1024)
+
+        Returns:
+            vision_features: Projected features of shape (batch_size, num_patches, 896)
+        """
+        # Pass through vision tower with return_image_embeddings=True
+        # This returns a dict with "image_embeddings" key containing features
+        vision_output = self.vision_tower(pixel_values, return_image_embeddings=True)
+        image_features = vision_output["image_embeddings"]
+
+        # image_features shape: (B, C, H, W) where C=3072 (vision_hidden_size)
+        # For FastVLM: H=16, W=16, so num_patches=256
+
+        # Reshape from (B, C, H, W) to (B, H*W, C) for projector
+        B, C, H, W = image_features.shape
+        image_features = image_features.reshape(B, C, H * W)
+        image_features = image_features.transpose(1, 2)  # (B, H*W, C)
+
+        # Project through MLP: (B, H*W, 3072) -> (B, H*W, 896)
+        vision_features = self.mm_projector(image_features)
+
+        return vision_features

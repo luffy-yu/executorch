@@ -395,8 +395,13 @@ class TextDecoder(Component):
         # in the input sequence. This token is used to mark positions where image embeddings
         # should be inserted during inference.
         if hasattr(self.config, VISION_ENCODER):
-            hf_config = AutoConfig.from_pretrained(self.config.repo_id)
-            kwargs["modality_placeholder_token_id"] = hf_config.image_token_id
+            hf_config = AutoConfig.from_pretrained(self.config.repo_id, trust_remote_code=True)
+            # FastVLM uses image_token_index (-200) from config, other models use image_token_id
+            if hasattr(hf_config, "image_token_id"):
+                kwargs["modality_placeholder_token_id"] = hf_config.image_token_id
+            else:
+                # Default image token ID for models without explicit config
+                kwargs["modality_placeholder_token_id"] = -200  # FastVLM IMAGE_TOKEN_INDEX
         # TODO: Support Audio modality
         elif hasattr(self.config, AUDIO_ENCODER):
             raise NotImplementedError(
@@ -444,17 +449,60 @@ class TextDecoder(Component):
         # get embedding model
         tok_embedding = None
         if self.apply_embedding:
-            auto_model = AutoModel.from_pretrained(
-                self.config.repo_id, _attn_implementation="eager"
-            )
-            tok_embedding = TextEmbedding(
-                auto_model.get_input_embeddings().to(torch.float32),
-                self.model_args.max_batch_size,
-                ar_len,
-                self.model_args.vocab_size,
-                self.model_args.dim,
-                use_i64_token,
-            )
+            # FastVLM uses custom architecture that can't be loaded with AutoModel
+            # For VLMs, we get embeddings from the local checkpoint instead
+            if "FastVLM" in self.config.repo_id or "fastvlm" in self.config.repo_id.lower():
+                # Load embeddings from local checkpoint
+                import os
+                from safetensors.torch import load_file
+
+                checkpoint_path = self.control_args.model
+                if checkpoint_path and checkpoint_path.endswith(".pth"):
+                    # If a converted checkpoint is provided, load it
+                    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+                    embed_weights = checkpoint.get("tok_embeddings.weight", None)
+                else:
+                    # Try loading from safetensors
+                    safetensor_paths = [
+                        "/home/n10288/Documents/Code/FastVLM-0.5B/model.safetensors",
+                    ]
+                    for path in safetensor_paths:
+                        if os.path.exists(path):
+                            checkpoint = load_file(path)
+                            embed_weights = checkpoint.get("model.embed_tokens.weight", None)
+                            break
+                    else:
+                        raise FileNotFoundError("Could not find FastVLM checkpoint")
+
+                if embed_weights is None:
+                    raise ValueError("Could not find embedding weights in FastVLM checkpoint")
+
+                # Create embedding layer
+                embed_layer = torch.nn.Embedding(
+                    self.model_args.vocab_size, self.model_args.dim
+                )
+                embed_layer.weight = torch.nn.Parameter(embed_weights.to(torch.float32))
+
+                tok_embedding = TextEmbedding(
+                    embed_layer,
+                    self.model_args.max_batch_size,
+                    ar_len,
+                    self.model_args.vocab_size,
+                    self.model_args.dim,
+                    use_i64_token,
+                )
+            else:
+                auto_model = AutoModel.from_pretrained(
+                    self.config.repo_id, _attn_implementation="eager", trust_remote_code=True
+                )
+                tok_embedding = TextEmbedding(
+                    auto_model.get_input_embeddings().to(torch.float32),
+                    self.model_args.max_batch_size,
+                    ar_len,
+                    self.model_args.vocab_size,
+                    self.model_args.dim,
+                    use_i64_token,
+                )
         # get decoder model
         self.model_args.max_batch_size = 1
         self.model_args.max_seq_len = self.control_args.max_seq_len
@@ -1026,17 +1074,46 @@ class Modality(Component):
             if modality == TEXT_ENCODER or modality == AUDIO_ENCODER:
                 raise NotImplementedError(f"{modality} is under development")
 
-            auto_model = AutoModel.from_pretrained(
-                repo_id, _attn_implementation="eager"
-            )
-            # Create an instance of the config class since it has init=False
-            self.model = config().create_encoder(auto_model.config)
-            # set strict to false to simplify parameter loading for non-text models
-            auto_model = auto_model.eval()
-            self.model = self.model.eval()
-            self.model.load_state_dict(auto_model.state_dict(), strict=False)
-            self.example_input = self.model.get_example_inputs()
-            self.preprocess = self.model.preprocess
+            # FastVLM uses custom vision encoder that can't be loaded via AutoModel
+            # Load weights directly from local checkpoint instead
+            if "FastVLM" in repo_id or "fastvlm" in repo_id.lower():
+                # FastVLM: load vision encoder with checkpoint from local directory
+                checkpoint_dir = control_args.model
+                if checkpoint_dir and checkpoint_dir.endswith(".pth"):
+                    # Convert checkpoint path to directory path
+                    import os
+                    checkpoint_dir = os.path.dirname(checkpoint_dir) or "."
+
+                # Try to find safetensors file in common locations
+                import os
+                possible_paths = [
+                    os.path.join(checkpoint_dir, "model.safetensors"),
+                    f"/home/n10288/Documents/Code/FastVLM-0.5B/model.safetensors",
+                ]
+                checkpoint_path = None
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        checkpoint_path = path
+                        break
+
+                # Create encoder directly without HuggingFace model
+                self.model = config().create_encoder(None, checkpoint_path=checkpoint_path)
+                self.model = self.model.eval()
+                self.example_input = self.model.get_example_inputs()
+                self.preprocess = self.model.preprocess
+            else:
+                # Standard path: load from HuggingFace
+                auto_model = AutoModel.from_pretrained(
+                    repo_id, _attn_implementation="eager", trust_remote_code=True
+                )
+                # Create an instance of the config class since it has init=False
+                self.model = config().create_encoder(auto_model.config)
+                # set strict to false to simplify parameter loading for non-text models
+                auto_model = auto_model.eval()
+                self.model = self.model.eval()
+                self.model.load_state_dict(auto_model.state_dict(), strict=False)
+                self.example_input = self.model.get_example_inputs()
+                self.preprocess = self.model.preprocess
 
             # set quant recipe
             self.quant_recipe: EncoderQuantRecipe = (

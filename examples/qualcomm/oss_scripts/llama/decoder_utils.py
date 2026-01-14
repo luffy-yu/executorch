@@ -820,6 +820,61 @@ def kv_inference(  # noqa: C901
         # pyre-ignore
         prompt_token_list = prompt.flatten().tolist()
 
+    # FastVLM: Replace tokenized <image> sequences with IMAGE_TOKEN_INDEX (-200)
+    # The Qwen tokenizer encodes image tokens in complex patterns:
+    # - Single "<image>": [27, 1805, 29] ("<", "image", ">")
+    # - Repeated "<image><image>": [27, 1805, 1784, 1805, 29] where 1784 is "><"
+    # - With newline "<image>\n": [27, 1805, 397] where 397 is ">\n"
+    # FastVLM expects a single -200 token per image placeholder
+    if is_multimodal and modality_placeholder_token_id == -200:
+        # Token IDs used by Qwen tokenizer for FastVLM image patterns
+        TOKEN_LT = 27         # "<"
+        TOKEN_IMAGE = 1805    # "image"
+        TOKEN_GT = 29         # ">"
+        TOKEN_GT_LT = 1784    # "><"
+        TOKEN_GT_NL = 397     # ">\n"
+
+        new_token_list = []
+        i = 0
+        while i < len(prompt_token_list):
+            # Check if we're at the start of an image token sequence
+            if (
+                prompt_token_list[i] == TOKEN_LT
+                and i + 1 < len(prompt_token_list)
+                and prompt_token_list[i + 1] == TOKEN_IMAGE
+            ):
+                # We're in an image sequence - count consecutive <image> tokens
+                new_token_list.append(-200)  # First image token
+                i += 2  # Skip "<" and "image"
+
+                # Continue processing consecutive image tokens
+                while i < len(prompt_token_list):
+                    if prompt_token_list[i] == TOKEN_GT:
+                        # End of last image token: ">"
+                        i += 1
+                        break
+                    elif prompt_token_list[i] == TOKEN_GT_NL:
+                        # End of last image token with newline: ">\n"
+                        # Keep the newline in the output
+                        i += 1
+                        break
+                    elif prompt_token_list[i] == TOKEN_GT_LT:
+                        # Continuation: "><" means end of one image, start of next
+                        new_token_list.append(-200)  # Next image token
+                        i += 1
+                        # Next should be "image" token
+                        if i < len(prompt_token_list) and prompt_token_list[i] == TOKEN_IMAGE:
+                            i += 1
+                        else:
+                            break
+                    else:
+                        # Unexpected token, exit loop
+                        break
+            else:
+                new_token_list.append(prompt_token_list[i])
+                i += 1
+        prompt_token_list = new_token_list
+
     # 2. forward text embedding
     if is_multimodal:
         input_ids = torch.tensor([prompt_token_list])
@@ -843,6 +898,17 @@ def kv_inference(  # noqa: C901
             # Calculate number of chunks needed
             num_chunks = (input_ids_len + ar_len - 1) // ar_len
 
+            # For embedding lookup, replace modality placeholder tokens (e.g., -200)
+            # with a valid token ID (0) since these positions will be overwritten
+            # by image embeddings anyway in _modality_inputs_merger
+            input_ids_for_embed = input_ids.clone()
+            if modality_placeholder_token_id < 0:
+                input_ids_for_embed = torch.where(
+                    input_ids_for_embed == modality_placeholder_token_id,
+                    torch.zeros_like(input_ids_for_embed),
+                    input_ids_for_embed,
+                )
+
             # Prefill embeddings in chunks
             for chunk_id in range(num_chunks):
                 chunk_start_idx = chunk_id * ar_len
@@ -851,7 +917,7 @@ def kv_inference(  # noqa: C901
                 # Only process if there are tokens in this chunk
                 if chunk_start_idx < input_ids_len:
                     embedding = tok_embedding(
-                        input_ids[:, chunk_start_idx:chunk_end_idx]
+                        input_ids_for_embed[:, chunk_start_idx:chunk_end_idx]
                     )
                     # Put embedding in the correct position
                     actual_chunk_len = embedding.shape[1]
@@ -909,7 +975,9 @@ def kv_inference(  # noqa: C901
             lookahead_config,
         )
 
-    logging.info(f"kv inference result:\n{tokenizer.decode(total_token_list)}")
+    # Filter out negative token IDs (e.g., -200 image placeholders) before decoding
+    decodable_tokens = [t for t in total_token_list if t >= 0]
+    logging.info(f"kv inference result:\n{tokenizer.decode(decodable_tokens)}")
     if collect_logits:
         result_logits = torch.cat(result_logits, dim=1)
     return result_logits
@@ -955,6 +1023,50 @@ def prefill_inference(
     else:
         # pyre-ignore
         token_list = prompt.flatten().tolist()
+
+    # FastVLM: Replace tokenized <image> sequences with IMAGE_TOKEN_INDEX (-200)
+    # The Qwen tokenizer encodes image tokens in complex patterns:
+    # - Single "<image>": [27, 1805, 29] ("<", "image", ">")
+    # - Repeated "<image><image>": [27, 1805, 1784, 1805, 29] where 1784 is "><"
+    # - With newline "<image>\n": [27, 1805, 397] where 397 is ">\n"
+    # FastVLM expects a single -200 token per image placeholder
+    if is_multimodal and modality_placeholder_token_id == -200:
+        TOKEN_LT = 27
+        TOKEN_IMAGE = 1805
+        TOKEN_GT = 29
+        TOKEN_GT_LT = 1784
+        TOKEN_GT_NL = 397
+
+        new_token_list = []
+        i = 0
+        while i < len(token_list):
+            if (
+                token_list[i] == TOKEN_LT
+                and i + 1 < len(token_list)
+                and token_list[i + 1] == TOKEN_IMAGE
+            ):
+                new_token_list.append(-200)
+                i += 2
+                while i < len(token_list):
+                    if token_list[i] == TOKEN_GT:
+                        i += 1
+                        break
+                    elif token_list[i] == TOKEN_GT_NL:
+                        i += 1
+                        break
+                    elif token_list[i] == TOKEN_GT_LT:
+                        new_token_list.append(-200)
+                        i += 1
+                        if i < len(token_list) and token_list[i] == TOKEN_IMAGE:
+                            i += 1
+                        else:
+                            break
+                    else:
+                        break
+            else:
+                new_token_list.append(token_list[i])
+                i += 1
+        token_list = new_token_list
 
     pos = len(token_list)
     dtype = torch.int64 if use_i64_token else torch.int32

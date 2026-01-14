@@ -14,6 +14,7 @@ from executorch.examples.qualcomm.oss_scripts.llama.encoder.encoder_quant_recipe
 )
 
 from executorch.examples.qualcomm.oss_scripts.llama.model.vision_encoder import (
+    FastVLMVisionEncoder,
     Idefics3VisionEncoder,
     InternVL3VisionEncoder,
 )
@@ -59,9 +60,9 @@ class VisionModalityConfig(LateFusionModalityConfig):
     img_resized_w: int
     img_url: str
 
-    def create_encoder(self, config):
+    def create_encoder(self, config, **kwargs):
         return self.encoder_class(
-            config, img_resized_h=self.img_resized_h, img_resized_w=self.img_resized_w
+            config, img_resized_h=self.img_resized_h, img_resized_w=self.img_resized_w, **kwargs
         )
 
 
@@ -91,3 +92,23 @@ class InternVL3Encoder(VisionModalityConfig):
     img_resized_w = 448
     img_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
     quant_recipe = InternVL3_Encoder_QuantRecipe
+
+
+@dataclass(init=False, frozen=True)
+class FastVLMEncoder(VisionModalityConfig):
+    """
+    Config for FastVLM vision encoder (FastViTHD).
+
+    FastVLM uses FastViTHD as the vision encoder with:
+    - Input image size: 1024x1024
+    - Multi-stage downsampling: 64x total (4x stem + 4 stride-2 stages)
+    - Output dim: 3072 (before MLP projection to 896)
+    - Number of patches: 16x16 = 256
+    """
+
+    encoder_class = FastVLMVisionEncoder
+    img_seq_len = 256  # FastViTHD outputs 16x16 = 256 patches from 1024x1024 input (64x downsampling)
+    img_resized_h = 1024
+    img_resized_w = 1024
+    img_url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
+    quant_recipe = SmolVLM_Encoder_QuantRecipe

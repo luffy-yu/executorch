@@ -68,17 +68,38 @@ class DatasetBuilder:
 
         # Process image with text prompt using HuggingFace processor
         # Some HF processors (e.g. InternVL3) need to pass text arg or it will cause error and process failed
-        processor = AutoProcessor.from_pretrained(self.repo_id)
-        pixel_values = processor(
-            text=prompt,
-            images=[image],
-            return_tensors="pt",
-            crop_to_patches=False,
-            size={
-                "height": config.img_resized_h,
-                "width": config.img_resized_w,
-            },
-        ).pixel_values
+        # FastVLM uses a custom CLIPImageProcessor with specific normalization settings
+        if "FastVLM" in self.repo_id or "fastvlm" in self.repo_id.lower():
+            # FastVLM uses CLIPImageProcessor with no normalization (mean=0, std=1)
+            from transformers import CLIPImageProcessor
+
+            processor = CLIPImageProcessor(
+                crop_size={
+                    "height": config.img_resized_h,
+                    "width": config.img_resized_w,
+                },
+                image_mean=[0.0, 0.0, 0.0],
+                image_std=[1.0, 1.0, 1.0],
+                size={"shortest_edge": config.img_resized_h},
+                do_rescale=True,
+                rescale_factor=1.0 / 255.0,
+            )
+            pixel_values = processor(
+                images=[image],
+                return_tensors="pt",
+            ).pixel_values
+        else:
+            processor = AutoProcessor.from_pretrained(self.repo_id)
+            pixel_values = processor(
+                text=prompt,
+                images=[image],
+                return_tensors="pt",
+                crop_to_patches=False,
+                size={
+                    "height": config.img_resized_h,
+                    "width": config.img_resized_w,
+                },
+            ).pixel_values
 
         # save image file for runtime evaluation
         pixel_values.detach().numpy().tofile(
