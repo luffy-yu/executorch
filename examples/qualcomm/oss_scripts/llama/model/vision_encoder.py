@@ -405,9 +405,10 @@ class FastVLMVisionEncoder(torch.nn.Module):
         self.vision_hidden_size = 3072  # FastViTHD output dim
         self.projector_hidden_size = 896  # Text decoder hidden size
 
-        # Import and create FastViT vision tower
-        from .fastvit import fastvithd
-        self.vision_tower = fastvithd(pretrained=False, num_classes=0)
+        # Import and create FastViT vision tower using mci.py
+        # Use inference_mode=False to match the checkpoint weight structure
+        from .mci import fastvithd
+        self.vision_tower = fastvithd(pretrained=False, inference_mode=False, num_classes=0)
 
         # Build MLP projector
         self.mm_projector = self._build_projector()
@@ -436,9 +437,14 @@ class FastVLMVisionEncoder(torch.nn.Module):
         - vision_tower.vision_tower.* weights for FastViTHD
         - mm_projector.* weights for MLP projector
 
-        Supports loading from:
-        - Direct safetensors file path
-        - Directory containing model.safetensors
+        The FastVLM checkpoint has a mixed reparametrization state:
+        - patch_embed: already reparametrized (reparam_conv)
+        - token_mixer (RepMixer): already reparametrized (reparam_conv)
+        - convffn: still in training mode (conv.bn structure)
+        - conv_exp: already reparametrized (reparam_conv)
+
+        To handle this, we first reparametrize the model components that have
+        reparam_conv weights in the checkpoint before loading.
         """
         import os
 
@@ -469,7 +475,7 @@ class FastVLMVisionEncoder(torch.nn.Module):
 
         for key, value in state_dict.items():
             if 'vision_tower.vision_tower' in key:
-                # Remove 'model.vision_tower.vision_tower.model.' or 'vision_tower.vision_tower.' prefix
+                # Remove 'model.vision_tower.vision_tower.model.' prefix
                 if key.startswith('model.vision_tower.vision_tower.model.'):
                     new_key = key[len('model.vision_tower.vision_tower.model.'):]
                 elif key.startswith('vision_tower.vision_tower.model.'):
@@ -480,7 +486,7 @@ class FastVLMVisionEncoder(torch.nn.Module):
                     continue
                 vision_state_dict[new_key] = value
             elif 'mm_projector' in key:
-                # Remove 'model.mm_projector.' or 'mm_projector.' prefix
+                # Remove 'model.mm_projector.' prefix
                 if key.startswith('model.mm_projector.'):
                     new_key = key[len('model.mm_projector.'):]
                 elif key.startswith('mm_projector.'):
@@ -488,6 +494,10 @@ class FastVLMVisionEncoder(torch.nn.Module):
                 else:
                     continue
                 projector_state_dict[new_key] = value
+
+        # Before loading, reparametrize the model components that have reparam_conv
+        # weights in the checkpoint (patch_embed, token_mixer, conv_exp)
+        self._prepare_model_for_checkpoint(vision_state_dict)
 
         # Load vision tower weights
         if vision_state_dict:
@@ -514,6 +524,47 @@ class FastVLMVisionEncoder(torch.nn.Module):
                 print(f"Warning: Unexpected keys in projector: {unexpected}")
         else:
             print("Warning: No projector weights found in checkpoint with prefix 'mm_projector.'")
+
+    def _prepare_model_for_checkpoint(self, checkpoint_keys):
+        """
+        Prepare model structure to match checkpoint by selectively reparametrizing
+        components that have reparam_conv weights in the checkpoint.
+        """
+        from torch import nn
+
+        # Check which components have reparam_conv in checkpoint
+        has_patch_embed_reparam = any('patch_embed' in k and 'reparam_conv' in k for k in checkpoint_keys)
+        has_conv_exp_reparam = any('conv_exp.reparam_conv' in k for k in checkpoint_keys)
+        has_token_mixer_reparam = any('token_mixer.reparam_conv' in k for k in checkpoint_keys)
+
+        # Reparametrize patch_embed if checkpoint has reparam_conv
+        if has_patch_embed_reparam:
+            for module in self.vision_tower.patch_embed:
+                if hasattr(module, 'reparameterize'):
+                    module.reparameterize()
+
+        # Reparametrize conv_exp if checkpoint has reparam_conv
+        if has_conv_exp_reparam and hasattr(self.vision_tower, 'conv_exp'):
+            if hasattr(self.vision_tower.conv_exp, 'reparameterize'):
+                self.vision_tower.conv_exp.reparameterize()
+
+        # Reparametrize token_mixers in network blocks if checkpoint has reparam_conv
+        # Network contains Sequential (with RepMixerBlock/AttentionBlock), PatchEmbed, and RepCPE
+        if has_token_mixer_reparam:
+            for stage in self.vision_tower.network:
+                # Only iterate over Sequential stages that contain blocks
+                if isinstance(stage, nn.Sequential):
+                    for block in stage:
+                        if hasattr(block, 'token_mixer') and hasattr(block.token_mixer, 'reparameterize'):
+                            block.token_mixer.reparameterize()
+                # Handle PatchEmbed modules in the network (downsample layers)
+                elif hasattr(stage, 'reparameterize'):
+                    stage.reparameterize()
+                elif hasattr(stage, 'proj'):
+                    # PatchEmbed has a proj Sequential containing ReparamLargeKernelConv and MobileOneBlock
+                    for module in stage.proj:
+                        if hasattr(module, 'reparameterize'):
+                            module.reparameterize()
 
     def preprocess(self, pixel_values: Tuple[torch.FloatTensor]) -> Tuple[torch.Tensor]:
         """Preprocess pixel values before passing to vision tower."""
