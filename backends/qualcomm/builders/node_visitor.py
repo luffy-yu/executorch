@@ -487,6 +487,8 @@ class NodeVisitor:
                 QCOM_SCALE_OFFSET, QCOM_BITWIDTH,
                 # SCALE_OFFSET / BW_SCALE_OFFSET
                 QCOM_SCALE, QCOM_OFFSET,
+                # Required for get_quant_tensor_value
+                QCOM_DTYPE,
             }
             sanitized_quant_configs = {}
             for k, v in quant_configs.items():

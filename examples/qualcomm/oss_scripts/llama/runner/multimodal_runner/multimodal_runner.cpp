@@ -188,7 +188,8 @@ Error MultimodalRunner<T>::load() {
   if (decoder_model_version_ == MultimodalDecoderModelVersion::kSmolvlm) {
     eos_ids->insert(tokenizer_->encode("<end_of_utterance>", 0, 0).get()[0]);
   } else if (
-      decoder_model_version_ == MultimodalDecoderModelVersion::kInternvl3) {
+      decoder_model_version_ == MultimodalDecoderModelVersion::kInternvl3 ||
+      decoder_model_version_ == MultimodalDecoderModelVersion::kFastvlm) {
     eos_ids->insert(tokenizer_->encode("<|im_end|>", 0, 0).get()[0]);
   }
 
