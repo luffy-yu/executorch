@@ -381,11 +381,9 @@ def inference(
 
         # No pregen inputs, input_list is not required
         if not args.skip_push:
-            image_path = (
-                f"{args.pre_gen_pte}/{VISION_ENCODER_INPUT_FILENAME}.raw"
-                if args.pre_gen_pte
-                else f"{args.artifact}/{VISION_ENCODER_INPUT_FILENAME}.raw"
-            )
+            # Always use image from artifact folder since that's where it's saved during preprocessing
+            # regardless of whether pre_gen_pte is used (pre_gen_pte only applies to .pte model files)
+            image_path = f"{args.artifact}/{VISION_ENCODER_INPUT_FILENAME}.raw"
             adb.push(
                 inputs=[],
                 files=[runtime_tokenizer_path] + ([image_path] if is_modality else []),
