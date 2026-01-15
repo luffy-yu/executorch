@@ -80,7 +80,12 @@ class TokenizerWrapper:
         return runtime_tokenizer_path, tokenizer
 
     def _from_hf(self):
-        tokenizer = AutoTokenizer.from_pretrained(self.repo_id)
+        import os
+        # Support local paths for FastVLM
+        if os.path.isdir(self.repo_id):
+            tokenizer = AutoTokenizer.from_pretrained(self.repo_id, local_files_only=True)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.repo_id)
         chat_template = (
             tokenizer.apply_chat_template
             if hasattr(tokenizer, "apply_chat_template") and self.apply_chat_template

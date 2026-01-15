@@ -435,8 +435,17 @@ class FastVLMVisionEncoder(torch.nn.Module):
         This method extracts:
         - vision_tower.vision_tower.* weights for FastViTHD
         - mm_projector.* weights for MLP projector
+
+        Supports loading from:
+        - Direct safetensors file path
+        - Directory containing model.safetensors
         """
         import os
+
+        # Handle directory path - look for model.safetensors inside
+        if os.path.isdir(checkpoint_path):
+            checkpoint_path = os.path.join(checkpoint_path, "model.safetensors")
+
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
