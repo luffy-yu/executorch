@@ -932,6 +932,31 @@ def kv_inference(  # noqa: C901
                 modality_placeholder_token_id,
             )
 
+            # DEBUG: Save and print compile-time text embeddings and merged embeddings
+            text_emb_slice = text_embeddings[:, :input_ids_len, :]
+            logging.info(f"[DEBUG] Compile text embeddings: shape={text_emb_slice.shape}, "
+                        f"range=[{text_emb_slice.min().item():.4f}, {text_emb_slice.max().item():.4f}], "
+                        f"mean={text_emb_slice.mean().item():.4f}, std={text_emb_slice.std().item():.4f}")
+            logging.info(f"[DEBUG] Compile merged embeddings: shape={multimodal_embedding.shape}, "
+                        f"range=[{multimodal_embedding.min().item():.4f}, {multimodal_embedding.max().item():.4f}], "
+                        f"mean={multimodal_embedding.mean().item():.4f}, std={multimodal_embedding.std().item():.4f}")
+
+            # Save to files for comparison with runtime
+            import os
+            debug_dir = os.environ.get("DEBUG_OUTPUT_DIR", ".")
+            text_emb_slice.cpu().numpy().tofile(f"{debug_dir}/debug_compile_text_embeddings.raw")
+            multimodal_embedding.cpu().numpy().tofile(f"{debug_dir}/debug_compile_merged_embeddings.raw")
+            logging.info(f"[DEBUG] Saved compile text embeddings to {debug_dir}/debug_compile_text_embeddings.raw")
+            logging.info(f"[DEBUG] Saved compile merged embeddings to {debug_dir}/debug_compile_merged_embeddings.raw")
+
+            # Also save image hidden states
+            img_hidden = torch.cat(hidden_states, dim=1)
+            logging.info(f"[DEBUG] Compile image hidden states: shape={img_hidden.shape}, "
+                        f"range=[{img_hidden.min().item():.4f}, {img_hidden.max().item():.4f}], "
+                        f"mean={img_hidden.mean().item():.4f}, std={img_hidden.std().item():.4f}")
+            img_hidden.cpu().numpy().tofile(f"{debug_dir}/debug_compile_image_hidden_states.raw")
+            logging.info(f"[DEBUG] Saved compile image hidden states to {debug_dir}/debug_compile_image_hidden_states.raw")
+
     # record total input tokens and generated tokens
     total_token_list = prompt_token_list
 

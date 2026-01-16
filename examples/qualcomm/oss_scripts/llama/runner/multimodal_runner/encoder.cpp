@@ -117,6 +117,36 @@ Result<Tensor> EncoderRunner::encode_from_file(
   file.read(reinterpret_cast<char*>(buffer.data()), expected_size);
   file.close();
 
+  // DEBUG: Print input statistics
+  float min_val = buffer[0], max_val = buffer[0];
+  double sum = 0.0, sum_sq = 0.0;
+  for (int64_t i = 0; i < num_elem; ++i) {
+    float val = buffer[i];
+    min_val = std::min(min_val, val);
+    max_val = std::max(max_val, val);
+    sum += val;
+    sum_sq += val * val;
+  }
+  double mean = sum / num_elem;
+  double variance = (sum_sq / num_elem) - (mean * mean);
+  double std_dev = std::sqrt(variance > 0 ? variance : 0);
+  ET_LOG(
+      Info,
+      "[DEBUG] Runtime vision encoder input: num_elem=%ld, range=[%.4f, %.4f], mean=%.4f, std=%.4f",
+      num_elem,
+      min_val,
+      max_val,
+      mean,
+      std_dev);
+
+  // DEBUG: Save runtime input to file for comparison
+  std::ofstream debug_input("debug_runtime_vision_input.raw", std::ios::binary);
+  if (debug_input.is_open()) {
+    debug_input.write(reinterpret_cast<char*>(buffer.data()), expected_size);
+    debug_input.close();
+    ET_LOG(Info, "[DEBUG] Saved runtime vision input to debug_runtime_vision_input.raw");
+  }
+
   // Create tensor from buffer
   TensorPtr tensor = executorch::extension::from_blob(
       buffer.data(),
@@ -124,7 +154,47 @@ Result<Tensor> EncoderRunner::encode_from_file(
       executorch::aten::ScalarType::Float);
 
   // Encode the tensor
-  return encode(tensor);
+  auto result = encode(tensor);
+
+  // DEBUG: Save and print output statistics
+  if (result.ok()) {
+    auto output_tensor = result.get();
+    const float* output_data = output_tensor.const_data_ptr<float>();
+    int64_t output_numel = output_tensor.numel();
+
+    float out_min = output_data[0], out_max = output_data[0];
+    double out_sum = 0.0, out_sum_sq = 0.0;
+    for (int64_t i = 0; i < output_numel; ++i) {
+      float val = output_data[i];
+      out_min = std::min(out_min, val);
+      out_max = std::max(out_max, val);
+      out_sum += val;
+      out_sum_sq += val * val;
+    }
+    double out_mean = out_sum / output_numel;
+    double out_variance = (out_sum_sq / output_numel) - (out_mean * out_mean);
+    double out_std = std::sqrt(out_variance > 0 ? out_variance : 0);
+    ET_LOG(
+        Info,
+        "[DEBUG] Runtime vision encoder output: numel=%ld, range=[%.4f, %.4f], mean=%.4f, std=%.4f",
+        output_numel,
+        out_min,
+        out_max,
+        out_mean,
+        out_std);
+
+    // Save output to file
+    std::ofstream debug_output("debug_runtime_vision_output.raw", std::ios::binary);
+    if (debug_output.is_open()) {
+      debug_output.write(
+          reinterpret_cast<const char*>(output_data),
+          output_numel * sizeof(float));
+      debug_output.close();
+      ET_LOG(Info, "[DEBUG] Saved runtime vision output to debug_runtime_vision_output.raw");
+    }
+  }
+
+  return result;
 }
 
 } // namespace example

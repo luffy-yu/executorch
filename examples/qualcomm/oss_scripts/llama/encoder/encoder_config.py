@@ -105,6 +105,8 @@ class FastVLMEncoder(VisionModalityConfig):
     - Multi-stage downsampling: 64x total (4x stem + 4 stride-2 stages)
     - Output dim: 3072 (before MLP projection to 896)
     - Number of patches: 16x16 = 256
+
+    Note: Using 16a16w quantization for best accuracy with QNN backend.
     """
 
     encoder_class = FastVLMVisionEncoder
@@ -112,4 +114,4 @@ class FastVLMEncoder(VisionModalityConfig):
     img_resized_h = 1024
     img_resized_w = 1024
     img_url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-    quant_recipe = FastVLM_Encoder_QuantRecipe  # Use 16a16w to preserve accuracy
+    quant_recipe = FastVLM_Encoder_QuantRecipe  # Re-enabled with HistogramObserver

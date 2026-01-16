@@ -1138,18 +1138,56 @@ class Modality(Component):
             exec_prog_mgr.write_to_file(file)
 
     def quantize(self, request: Request):
-        if self.model is None or self.quant_recipe is None:
+        if self.model is None:
             return
 
         request_data = request.method_data[self.modality]
         with torch.no_grad():
+            # Generate intermediate outputs for downstream modalities (e.g., text decoder)
+            # even if quantization is skipped
+            intermediate_outputs = []
+            for idx, data in enumerate(request_data.calibration_data.datasets):
+                # DEBUG: Save vision encoder input for comparison with runtime
+                if self.modality == VISION_ENCODER:
+                    preprocessed = self.preprocess(data)
+                    input_tensor = preprocessed[0] if isinstance(preprocessed, tuple) else preprocessed
+                    debug_dir = self.control_args.artifact
+                    import numpy as np
+                    # Save input tensor as raw file
+                    input_np = input_tensor.cpu().numpy()
+                    input_np.tofile(f"{debug_dir}/debug_compile_vision_input_{idx}.raw")
+                    print(f"[DEBUG] Compile vision encoder input {idx}: shape={input_tensor.shape}, "
+                          f"dtype={input_tensor.dtype}, range=[{input_tensor.min().item():.4f}, {input_tensor.max().item():.4f}], "
+                          f"mean={input_tensor.mean().item():.4f}, std={input_tensor.std().item():.4f}")
+
+                output = self.model(*self.preprocess(data))
+
+                # DEBUG: Save vision encoder output for comparison with runtime
+                if self.modality == VISION_ENCODER:
+                    output_tensor = output[0] if isinstance(output, tuple) else output
+                    output_np = output_tensor.cpu().numpy()
+                    output_np.tofile(f"{debug_dir}/debug_compile_vision_output_{idx}.raw")
+                    print(f"[DEBUG] Compile vision encoder output {idx}: shape={output_tensor.shape}, "
+                          f"dtype={output_tensor.dtype}, range=[{output_tensor.min().item():.4f}, {output_tensor.max().item():.4f}], "
+                          f"mean={output_tensor.mean().item():.4f}, std={output_tensor.std().item():.4f}")
+
+                intermediate_outputs.append(
+                    (output,) if isinstance(output, torch.Tensor) else output
+                )
+            # update intermediate outputs for next modality
+            request_data.calibration_data.intermediate_outputs = intermediate_outputs
+
+            # Skip quantization if no quant recipe
+            if self.quant_recipe is None:
+                return
+
             self.model = torch.export.export(self.model, self.example_input).module()
 
             quantizer = make_quantizer()
             quantizer.recipe = self.quant_recipe
             self.model = prepare_pt2e(self.model, quantizer)
 
-            # calibration
+            # calibration - re-run to get outputs from prepared model
             intermediate_outputs = []
             for data in request_data.calibration_data.datasets:
                 output = self.model(*self.preprocess(data))

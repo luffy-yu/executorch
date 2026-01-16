@@ -88,7 +88,7 @@ class MultimodalRunner : public executorch::extension::llm::IRunner {
   void merge_multimodal_embeddings(
       const std::vector<uint64_t>& input_ids,
       const TensorStruct<float>& text_embeddings,
-      uint64_t placeholder_token_id);
+      int64_t placeholder_token_id);
 
  private:
   enum EvalMode {

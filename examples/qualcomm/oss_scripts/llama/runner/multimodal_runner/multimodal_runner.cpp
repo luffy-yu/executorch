@@ -554,6 +554,71 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
         encode_res.error(), "failed to encode prompt %s", prompt.c_str());
     prompt_tokens = encode_res.get();
   }
+  int64_t placeholder_token_id = 0;
+  if (module_->method_names()->count("modality_placeholder_token_id") > 0) {
+    placeholder_token_id =
+        module_->get("modality_placeholder_token_id")->toInt();
+  }
+
+  // FastVLM: Replace tokenized <image> sequences with IMAGE_TOKEN_INDEX (-200)
+  // The Qwen tokenizer encodes image tokens in complex patterns:
+  // - Single "<image>": [27, 1805, 29] ("<", "image", ">")
+  // - Repeated "<image><image>": [27, 1805, 1784, 1805, 29] where 1784 is "><"
+  // - With newline "<image>\n": [27, 1805, 397] where 397 is ">\n"
+  // FastVLM expects a single -200 token per image placeholder
+  if (placeholder_token_id == -200) {
+    const uint64_t TOKEN_LT = 27;       // "<"
+    const uint64_t TOKEN_IMAGE = 1805;  // "image"
+    const uint64_t TOKEN_GT = 29;       // ">"
+    const uint64_t TOKEN_GT_LT = 1784;  // "><"
+    const uint64_t TOKEN_GT_NL = 397;   // ">\n"
+
+    std::vector<uint64_t> new_tokens;
+    size_t i = 0;
+    while (i < prompt_tokens.size()) {
+      // Check if we're at the start of an image token sequence
+      if (prompt_tokens[i] == TOKEN_LT &&
+          i + 1 < prompt_tokens.size() &&
+          prompt_tokens[i + 1] == TOKEN_IMAGE) {
+        // We're in an image sequence - add placeholder token
+        // Cast -200 to uint64_t (it will be very large, but we'll cast back to
+        // signed in merge_multimodal_embeddings)
+        new_tokens.push_back(static_cast<uint64_t>(placeholder_token_id));
+        i += 2;  // Skip "<" and "image"
+
+        // Continue processing consecutive image tokens
+        while (i < prompt_tokens.size()) {
+          if (prompt_tokens[i] == TOKEN_GT) {
+            // End of last image token: ">"
+            i += 1;
+            break;
+          } else if (prompt_tokens[i] == TOKEN_GT_NL) {
+            // End of last image token with newline: ">\n"
+            i += 1;
+            break;
+          } else if (prompt_tokens[i] == TOKEN_GT_LT) {
+            // Continuation: "><" means end of one image, start of next
+            new_tokens.push_back(static_cast<uint64_t>(placeholder_token_id));
+            i += 1;
+            // Next should be "image" token
+            if (i < prompt_tokens.size() && prompt_tokens[i] == TOKEN_IMAGE) {
+              i += 1;
+            } else {
+              break;
+            }
+          } else {
+            // Unexpected token, exit loop
+            break;
+          }
+        }
+      } else {
+        new_tokens.push_back(prompt_tokens[i]);
+        i += 1;
+      }
+    }
+    prompt_tokens = std::move(new_tokens);
+  }
+
   int num_prompt_tokens = prompt_tokens.size();
   ET_CHECK_MSG(num_prompt_tokens >= 1, "Expected at least 1 prompt token");
   ET_CHECK_MSG(
@@ -565,20 +630,137 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
     token_callback(prompt);
   }
   bool dump_logits = dump_logits_path_.empty() ? false : true;
-  embedding_processor_->prefill(prompt_tokens);
+
+  // For embedding lookup, replace negative placeholder tokens (e.g., -200)
+  // with a valid token ID (0) since these positions will be overwritten
+  // by image embeddings anyway in merge_multimodal_embeddings
+  std::vector<uint64_t> tokens_for_embedding = prompt_tokens;
+  if (placeholder_token_id < 0) {
+    uint64_t placeholder_as_uint = static_cast<uint64_t>(placeholder_token_id);
+    for (size_t i = 0; i < tokens_for_embedding.size(); ++i) {
+      if (tokens_for_embedding[i] == placeholder_as_uint) {
+        tokens_for_embedding[i] = 0;  // Replace with valid token ID
+      }
+    }
+  }
+
+  embedding_processor_->prefill(tokens_for_embedding);
   const TensorStruct<float>& text_embeddings =
       embedding_processor_->get_prompt_embeddings();
   int64_t embedding_dim = text_embeddings.tensor->size(2);
 
-  uint64_t placeholder_token_id = 0;
-  if (module_->method_names()->count("modality_placeholder_token_id") > 0) {
-    placeholder_token_id =
-        module_->get("modality_placeholder_token_id")->toInt();
+  // DEBUG: Save and print text embeddings statistics
+  {
+    int64_t text_numel = text_embeddings.tensor->numel();
+    const float* text_data = text_embeddings.data;
+    float text_min = text_data[0], text_max = text_data[0];
+    double text_sum = 0.0, text_sum_sq = 0.0;
+    for (int64_t i = 0; i < text_numel; ++i) {
+      float val = text_data[i];
+      text_min = std::min(text_min, val);
+      text_max = std::max(text_max, val);
+      text_sum += val;
+      text_sum_sq += val * val;
+    }
+    double text_mean = text_sum / text_numel;
+    double text_variance = (text_sum_sq / text_numel) - (text_mean * text_mean);
+    double text_std = std::sqrt(text_variance > 0 ? text_variance : 0);
+    ET_LOG(
+        Info,
+        "[DEBUG] Runtime text embeddings: numel=%ld, range=[%.4f, %.4f], mean=%.4f, std=%.4f",
+        text_numel,
+        text_min,
+        text_max,
+        text_mean,
+        text_std);
+
+    // Save text embeddings to file
+    std::ofstream debug_text("debug_runtime_text_embeddings.raw", std::ios::binary);
+    if (debug_text.is_open()) {
+      debug_text.write(
+          reinterpret_cast<const char*>(text_data),
+          text_numel * sizeof(float));
+      debug_text.close();
+      ET_LOG(Info, "[DEBUG] Saved runtime text embeddings to debug_runtime_text_embeddings.raw");
+    }
+  }
+
+  // DEBUG: Print image hidden states statistics
+  if (image_hidden_states_) {
+    int64_t img_numel = image_hidden_states_->numel();
+    const float* img_data = image_hidden_states_->const_data_ptr<float>();
+    float img_min = img_data[0], img_max = img_data[0];
+    double img_sum = 0.0, img_sum_sq = 0.0;
+    for (int64_t i = 0; i < img_numel; ++i) {
+      float val = img_data[i];
+      img_min = std::min(img_min, val);
+      img_max = std::max(img_max, val);
+      img_sum += val;
+      img_sum_sq += val * val;
+    }
+    double img_mean = img_sum / img_numel;
+    double img_variance = (img_sum_sq / img_numel) - (img_mean * img_mean);
+    double img_std = std::sqrt(img_variance > 0 ? img_variance : 0);
+    ET_LOG(
+        Info,
+        "[DEBUG] Runtime image hidden states (from encoder): numel=%ld, range=[%.4f, %.4f], mean=%.4f, std=%.4f",
+        img_numel,
+        img_min,
+        img_max,
+        img_mean,
+        img_std);
+
+    // Save image hidden states to file
+    std::ofstream debug_img("debug_runtime_image_hidden_states.raw", std::ios::binary);
+    if (debug_img.is_open()) {
+      debug_img.write(
+          reinterpret_cast<const char*>(img_data),
+          img_numel * sizeof(float));
+      debug_img.close();
+      ET_LOG(Info, "[DEBUG] Saved runtime image hidden states to debug_runtime_image_hidden_states.raw");
+    }
   }
 
   ET_LOG(Info, "Merging text embeddings with image hidden states");
+  // Use original prompt_tokens (with -200) for finding placeholder positions
   merge_multimodal_embeddings(
       prompt_tokens, text_embeddings, placeholder_token_id);
+
+  // DEBUG: Save and print merged embeddings statistics
+  {
+    int64_t merged_numel = merged_embeddings_.tensor->numel();
+    const float* merged_data = merged_embeddings_.data;
+    float merged_min = merged_data[0], merged_max = merged_data[0];
+    double merged_sum = 0.0, merged_sum_sq = 0.0;
+    for (int64_t i = 0; i < merged_numel; ++i) {
+      float val = merged_data[i];
+      merged_min = std::min(merged_min, val);
+      merged_max = std::max(merged_max, val);
+      merged_sum += val;
+      merged_sum_sq += val * val;
+    }
+    double merged_mean = merged_sum / merged_numel;
+    double merged_variance = (merged_sum_sq / merged_numel) - (merged_mean * merged_mean);
+    double merged_std = std::sqrt(merged_variance > 0 ? merged_variance : 0);
+    ET_LOG(
+        Info,
+        "[DEBUG] Runtime merged embeddings: numel=%ld, range=[%.4f, %.4f], mean=%.4f, std=%.4f",
+        merged_numel,
+        merged_min,
+        merged_max,
+        merged_mean,
+        merged_std);
+
+    // Save merged embeddings to file
+    std::ofstream debug_merged("debug_runtime_merged_embeddings.raw", std::ios::binary);
+    if (debug_merged.is_open()) {
+      debug_merged.write(
+          reinterpret_cast<const char*>(merged_data),
+          merged_numel * sizeof(float));
+      debug_merged.close();
+      ET_LOG(Info, "[DEBUG] Saved runtime merged embeddings to debug_runtime_merged_embeddings.raw");
+    }
+  }
 
   auto prefill_res =
       prompt_processor_->prefill(merged_embeddings_, cur_pos_, dump_logits);
@@ -674,12 +856,14 @@ template <typename T>
 void MultimodalRunner<T>::merge_multimodal_embeddings(
     const std::vector<uint64_t>& input_ids,
     const TensorStruct<float>& text_embeddings,
-    uint64_t placeholder_token_id) {
+    int64_t placeholder_token_id) {
   // This implements the modality_inputs_merger logic from decoder_utils.py
   // Find positions where placeholder tokens appear
+  // Note: placeholder_token_id can be negative (e.g., -200 for FastVLM)
   std::vector<size_t> placeholder_positions;
   for (size_t i = 0; i < input_ids.size(); ++i) {
-    if (input_ids[i] == placeholder_token_id) {
+    // Cast input_ids[i] to signed for comparison with potentially negative placeholder_token_id
+    if (static_cast<int64_t>(input_ids[i]) == placeholder_token_id) {
       placeholder_positions.push_back(i);
     }
   }

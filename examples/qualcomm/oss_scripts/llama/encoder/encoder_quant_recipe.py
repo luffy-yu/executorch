@@ -12,7 +12,7 @@ from executorch.backends.qualcomm.quantizer.quant_recipe import (
     QuantRecipe,
 )
 from executorch.backends.qualcomm.quantizer.quantizer import QuantDtype
-from torchao.quantization.pt2e import MinMaxObserver
+from torchao.quantization.pt2e import HistogramObserver, MinMaxObserver
 
 
 class EncoderQuantRecipe:
@@ -80,14 +80,16 @@ class SmolVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
 class FastVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
     """
     Quantization recipe for FastVLM vision encoder (FastViTHD).
-    Uses 16a16w (FP16-like) quantization to preserve accuracy.
-    The FastVLM encoder has wide activation ranges that don't quantize well with 8-bit weights.
+    Uses 16a8w (16-bit activations, 8-bit weights) quantization - same as SmolVLM/InternVL3.
+    8-bit weights have better HTP optimization support than 16-bit.
     """
-    default_quant_dtype = QuantDtype.use_16a16w
+    default_quant_dtype = QuantDtype.use_16a8w
 
     def __init__(self, verbose: bool = False):
         super().__init__()
 
+        # Use 16a8w like other vision encoders (SmolVLM, InternVL3)
+        # 8-bit weights are better optimized on HTP than 16-bit
         self.recipe = QuantRecipe(
             self.default_quant_dtype,
             False,
@@ -98,7 +100,7 @@ class FastVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
             {
                 torch.ops.aten.linear.default,
             },
-            QuantDtype.use_16a16w,
+            QuantDtype.use_16a8w,
             False,
             act_observer=MinMaxObserver,
             granularity=QuantGranularity.PER_CHANNEL,

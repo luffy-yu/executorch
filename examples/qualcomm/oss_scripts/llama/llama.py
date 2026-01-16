@@ -97,8 +97,13 @@ def compile(
         if not hasattr(decoder_model_config, modality):
             continue
 
+        # Check if this encoder has quantization disabled (quant_recipe=None)
+        # If so, use FP16 precision instead of quantized precision
+        encoder_config = getattr(decoder_model_config, modality)
+        use_fp16_for_encoder = encoder_config.quant_recipe is None
+
         backend_options = generate_htp_compiler_spec(
-            use_fp16=False,
+            use_fp16=use_fp16_for_encoder,
         )
         encoder_compile_specs = generate_qnn_executorch_compiler_spec(
             soc_model=get_soc_to_chipset_map()[args.model],
