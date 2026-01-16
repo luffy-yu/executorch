@@ -53,7 +53,12 @@ def fastvlm_tune_to_meta(
             pass
 
     # Add output layer (lm_head)
-    converted_text_model_state_dict["output.weight"] = state_dict["lm_head.weight"]
+    # Handle tied embeddings: if lm_head.weight doesn't exist, use embed_tokens.weight
+    if "lm_head.weight" in state_dict:
+        converted_text_model_state_dict["output.weight"] = state_dict["lm_head.weight"]
+    else:
+        # For models with tie_word_embeddings=True, lm_head shares weights with embed_tokens
+        converted_text_model_state_dict["output.weight"] = state_dict["model.embed_tokens.weight"]
 
     return converted_text_model_state_dict
 

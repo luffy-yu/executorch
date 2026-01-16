@@ -549,7 +549,7 @@ class SmolVLM_500M(LLMModelConfig):
 @dataclass(init=False, frozen=True)
 class FastVLM_0_5B(LLMModelConfig):
     # Use local checkpoint path from ml-fastvlm repository
-    repo_id: str = "/home/n10288/Documents/Code/ml-fastvlm/checkpoints/llava-fastvithd_0.5b_stage3"
+    repo_id: str = "/home/n10288/Documents/Code/ml-fastvlm/exported/llava-fastvithd_0.5b_fp16"
     params_path: str = os.path.join(
         BASE_DIR, "../../../models/fastvlm/config/0_5b_config.json"
     )
