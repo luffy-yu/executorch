@@ -464,9 +464,9 @@ class FastVLMVisionEncoder(torch.nn.Module):
             # Fallback to regular torch load
             state_dict = torch.load(checkpoint_path, map_location='cpu')
 
-        # Convert bfloat16 weights to float32 (QNN backend doesn't support bfloat16)
+        # Convert bfloat16/float16 weights to float32 (QNN backend doesn't support bfloat16/float16)
         for key in state_dict:
-            if state_dict[key].dtype == torch.bfloat16:
+            if state_dict[key].dtype == torch.bfloat16 or state_dict[key].dtype == torch.float16:
                 state_dict[key] = state_dict[key].to(torch.float32)
 
         # Extract vision tower and projector weights

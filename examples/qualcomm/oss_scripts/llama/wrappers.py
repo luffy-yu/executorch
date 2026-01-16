@@ -1161,17 +1161,30 @@ class Modality(Component):
 
             self.model = convert_pt2e(self.model)
 
+            # Always collect and compare QDQ outputs to verify quantization quality
             qdq_intermediate_outputs = []
-            if self.control_args.verbose:
-                for data in request_data.calibration_data.datasets:
-                    output = self.model(*self.preprocess(data))
-                    qdq_intermediate_outputs.append(
-                        (output,) if isinstance(output, torch.Tensor) else output
-                    )
-                # update qdq intermediate outputs for next modality
-                request_data.calibration_data.qdq_intermediate_outputs = (
-                    qdq_intermediate_outputs
+            for data in request_data.calibration_data.datasets:
+                output = self.model(*self.preprocess(data))
+                qdq_intermediate_outputs.append(
+                    (output,) if isinstance(output, torch.Tensor) else output
                 )
+            # update qdq intermediate outputs for next modality
+            request_data.calibration_data.qdq_intermediate_outputs = (
+                qdq_intermediate_outputs
+            )
+
+            # Compare pre-quantization vs post-quantization outputs
+            if intermediate_outputs and qdq_intermediate_outputs:
+                import logging
+                for i, (pre, post) in enumerate(zip(intermediate_outputs, qdq_intermediate_outputs)):
+                    pre_tensor = pre[0] if isinstance(pre, tuple) else pre
+                    post_tensor = post[0] if isinstance(post, tuple) else post
+                    diff = (pre_tensor - post_tensor).abs()
+                    logging.info(f"[{self.modality}] Quantization diff sample {i}: "
+                                f"max={diff.max().item():.6f}, "
+                                f"mean={diff.mean().item():.6f}, "
+                                f"pre_range=[{pre_tensor.min().item():.4f}, {pre_tensor.max().item():.4f}], "
+                                f"post_range=[{post_tensor.min().item():.4f}, {post_tensor.max().item():.4f}]")
 
 
 class MultiModalManager(Component):

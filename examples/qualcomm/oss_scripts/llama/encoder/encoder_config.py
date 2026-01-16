@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from executorch.examples.qualcomm.oss_scripts.llama.encoder.encoder_quant_recipe import (
     EncoderQuantRecipe,
+    FastVLM_Encoder_QuantRecipe,
     InternVL3_Encoder_QuantRecipe,
     SmolVLM_Encoder_QuantRecipe,
 )
@@ -111,4 +112,4 @@ class FastVLMEncoder(VisionModalityConfig):
     img_resized_h = 1024
     img_resized_w = 1024
     img_url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-    quant_recipe = SmolVLM_Encoder_QuantRecipe
+    quant_recipe = FastVLM_Encoder_QuantRecipe  # Use 16a16w to preserve accuracy

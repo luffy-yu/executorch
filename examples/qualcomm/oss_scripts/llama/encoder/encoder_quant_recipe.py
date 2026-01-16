@@ -75,3 +75,31 @@ class SmolVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
             act_observer=MinMaxObserver,
             granularity=QuantGranularity.PER_CHANNEL,
         )
+
+
+class FastVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
+    """
+    Quantization recipe for FastVLM vision encoder (FastViTHD).
+    Uses 16a16w (FP16-like) quantization to preserve accuracy.
+    The FastVLM encoder has wide activation ranges that don't quantize well with 8-bit weights.
+    """
+    default_quant_dtype = QuantDtype.use_16a16w
+
+    def __init__(self, verbose: bool = False):
+        super().__init__()
+
+        self.recipe = QuantRecipe(
+            self.default_quant_dtype,
+            False,
+            act_observer=MinMaxObserver,
+            granularity=QuantGranularity.PER_TENSOR,
+            verbose=verbose,
+        ).add_node_target(
+            {
+                torch.ops.aten.linear.default,
+            },
+            QuantDtype.use_16a16w,
+            False,
+            act_observer=MinMaxObserver,
+            granularity=QuantGranularity.PER_CHANNEL,
+        )
