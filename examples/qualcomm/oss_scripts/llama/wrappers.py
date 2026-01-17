@@ -82,7 +82,38 @@ from executorch.extension.llm.export.builder import DType
 from torchao.prototype.spinquant import apply_spinquant
 from torchao.quantization.pt2e import MinMaxObserver
 from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+from torchao.quantization.pt2e.prepare import prepare as torchao_prepare
+from torchao.quantization.pt2e.utils import _disallow_eval_train, _get_node_name_to_scope
 from transformers import AutoConfig, AutoModel
+
+
+def prepare_pt2e_no_fusion(model, quantizer):
+    """
+    Custom prepare_pt2e that SKIPS Conv+BatchNorm fusion.
+
+    The standard prepare_pt2e calls _fuse_conv_bn_ which fuses Conv2d + BatchNorm2d
+    into a single Conv2d. This fusion can cause quantization issues when the fused
+    weights have very different numerical ranges than the original weights.
+
+    This version skips the fusion, allowing BatchNorm to be quantized separately.
+    """
+    original_graph_meta = model.meta
+    node_name_to_scope = _get_node_name_to_scope(model)
+
+    # SKIP: _fuse_conv_bn_(model)  - This is the key difference!
+
+    model = quantizer.transform_for_annotation(model)
+    quantizer.annotate(model)
+    quantizer.validate(model)
+    model = torchao_prepare(
+        model,
+        node_name_to_scope,
+        is_qat=False,
+        obs_or_fq_callback=quantizer.prepare_obs_or_fq_callback,
+    )
+    model.meta.update(original_graph_meta)
+    model = _disallow_eval_train(model)
+    return model
 
 
 def is_node_src_start_with_name(node: torch.fx.Node, prefix: str) -> bool:
@@ -1213,7 +1244,6 @@ class Modality(Component):
 
             # Compare pre-quantization vs post-quantization outputs
             if intermediate_outputs and qdq_intermediate_outputs:
-                import logging
                 for i, (pre, post) in enumerate(zip(intermediate_outputs, qdq_intermediate_outputs)):
                     pre_tensor = pre[0] if isinstance(pre, tuple) else pre
                     post_tensor = post[0] if isinstance(post, tuple) else post

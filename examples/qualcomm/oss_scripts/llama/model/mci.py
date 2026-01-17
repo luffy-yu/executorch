@@ -926,6 +926,57 @@ class ConvFFN(nn.Module):
         x = self.drop(x)
         return x
 
+    def reparameterize(self) -> None:
+        """Fuse Conv2d and BatchNorm2d into a single Conv2d.
+
+        This eliminates BatchNorm layers which can cause numerical issues
+        with QNN backend when running_var values are extremely small (< 1e-6).
+        The BatchNorm statistics are folded into the conv weights and bias.
+        """
+        if not hasattr(self.conv, 'bn'):
+            return  # Already reparameterized
+
+        conv = self.conv.conv
+        bn = self.conv.bn
+
+        # Get BatchNorm parameters
+        gamma = bn.weight  # scale
+        beta = bn.bias  # shift
+        mean = bn.running_mean
+        var = bn.running_var
+        eps = bn.eps
+
+        # Compute fused weight and bias
+        # For depthwise conv: weight shape is (out_channels, 1, kH, kW)
+        # BatchNorm: y = gamma * (x - mean) / sqrt(var + eps) + beta
+        # Fused: y = gamma / sqrt(var + eps) * conv(x) + (beta - gamma * mean / sqrt(var + eps))
+        std = torch.sqrt(var + eps)
+        scale = gamma / std
+
+        # Fuse into conv weight (depthwise, so scale applies per-channel)
+        # weight: (out_channels, 1, kH, kW) -> multiply each output channel by its scale
+        fused_weight = conv.weight * scale.view(-1, 1, 1, 1)
+
+        # Compute fused bias
+        fused_bias = beta - gamma * mean / std
+
+        # Create new conv with bias
+        fused_conv = nn.Conv2d(
+            in_channels=conv.in_channels,
+            out_channels=conv.out_channels,
+            kernel_size=conv.kernel_size,
+            stride=conv.stride,
+            padding=conv.padding,
+            dilation=conv.dilation,
+            groups=conv.groups,
+            bias=True,
+        )
+        fused_conv.weight.data = fused_weight
+        fused_conv.bias.data = fused_bias
+
+        # Replace self.conv with fused conv (no bn anymore)
+        self.conv = fused_conv
+
 
 class RepCPE(nn.Module):
     """Implementation of conditional positional encoding.

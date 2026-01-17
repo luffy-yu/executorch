@@ -497,6 +497,8 @@ class FastVLMVisionEncoder(torch.nn.Module):
 
         # Before loading, reparametrize the model components that have reparam_conv
         # weights in the checkpoint (patch_embed, token_mixer, conv_exp)
+        # NOTE: ConvFFN reparameterization happens AFTER loading because it needs
+        # the BatchNorm running_mean and running_var from the checkpoint
         self._prepare_model_for_checkpoint(vision_state_dict)
 
         # Load vision tower weights
@@ -512,6 +514,10 @@ class FastVLMVisionEncoder(torch.nn.Module):
                 print(f"First few: {list(unexpected)[:5]}")
         else:
             print("Warning: No vision tower weights found in checkpoint with prefix 'vision_tower.vision_tower.'")
+
+        # CRITICAL: Reparameterize ConvFFN modules AFTER loading weights
+        # This fuses the BatchNorm layers (with their loaded running_mean/var) into Conv2d
+        self._reparameterize_convffn()
 
         # Load projector weights
         if projector_state_dict:
@@ -529,6 +535,10 @@ class FastVLMVisionEncoder(torch.nn.Module):
         """
         Prepare model structure to match checkpoint by selectively reparametrizing
         components that have reparam_conv weights in the checkpoint.
+
+        Also reparameterizes ConvFFN modules to fuse Conv+BatchNorm, which is critical
+        for QNN backend as the BatchNorm layers have very small running_var values
+        (1e-8) that cause numerical issues.
         """
         from torch import nn
 
@@ -565,6 +575,30 @@ class FastVLMVisionEncoder(torch.nn.Module):
                     for module in stage.proj:
                         if hasattr(module, 'reparameterize'):
                             module.reparameterize()
+        # NOTE: ConvFFN reparameterization is done after weight loading in _load_from_checkpoint
+        # because it needs the BatchNorm running_mean and running_var from the checkpoint
+
+    def _reparameterize_convffn(self):
+        """Reparameterize all ConvFFN modules in the network.
+
+        This fuses Conv2d + BatchNorm2d into a single Conv2d, eliminating
+        the BatchNorm layers which have very small running_var values that
+        cause numerical issues in the QNN backend.
+        """
+        from .mci import ConvFFN
+
+        convffn_count = 0
+        for stage in self.vision_tower.network:
+            if isinstance(stage, torch.nn.Sequential):
+                for block in stage:
+                    # Check for convffn attribute in blocks (RepMixerBlock, AttentionBlock, etc.)
+                    if hasattr(block, 'convffn') and isinstance(block.convffn, ConvFFN):
+                        if hasattr(block.convffn, 'reparameterize'):
+                            block.convffn.reparameterize()
+                            convffn_count += 1
+
+        if convffn_count > 0:
+            print(f"Reparameterized {convffn_count} ConvFFN modules (fused Conv+BatchNorm)")
 
     def preprocess(self, pixel_values: Tuple[torch.FloatTensor]) -> Tuple[torch.Tensor]:
         """Preprocess pixel values before passing to vision tower."""
