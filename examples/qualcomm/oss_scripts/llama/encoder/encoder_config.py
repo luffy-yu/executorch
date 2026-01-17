@@ -114,6 +114,6 @@ class FastVLMEncoder(VisionModalityConfig):
     img_resized_h = 1024
     img_resized_w = 1024
     img_url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-    # Using FP16 for now - quantization can be re-enabled after testing
-    # The ConvFFN BatchNorm fusion fix should resolve the previous numerical issues
-    quant_recipe = FastVLM_Encoder_QuantRecipe
+    # Temporarily disable quantization to test if this is a quantization accuracy issue
+    # The vision encoder produces different output than compile-time model
+    quant_recipe = None

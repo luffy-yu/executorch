@@ -1288,6 +1288,47 @@ def annotate_batch_and_instance_norm(
     _mark_nodes_as_annotated([node, *annotated_args])
 
 
+@register_annotator(
+    [torch.ops.aten._native_batch_norm_legit_no_training.default]
+)
+def annotate_native_batch_norm_legit_no_training(
+    node: Node, quantization_config: QuantizationConfig
+) -> None:
+    """
+    Annotate _native_batch_norm_legit_no_training for quantization.
+    Schema: (input, weight, bias, running_mean, running_var, momentum, eps)
+    """
+    act, weight, bias = node.args[0:3]
+    if _is_annotated([node]):
+        return
+
+    annotated_args = [act]
+    annotate_input_qspec_map(
+        node,
+        act,
+        quantization_config.input_activation,
+    )
+    # QNN requires uint8 instead of int8 in 'weight' config
+    if weight is not None:
+        annotate_input_qspec_map(
+            node,
+            weight,
+            quantization_config.input_activation,
+        )
+        annotated_args.append(weight)
+
+    if bias is not None:
+        annotate_input_qspec_map(
+            node,
+            bias,
+            quantization_config.bias,
+        )
+        annotated_args.append(bias)
+
+    annotate_output_qspec(node, quantization_config.output_activation)
+    _mark_nodes_as_annotated([node, *annotated_args])
+
+
 @register_annotator([operator.getitem])
 def annotate_getitem(node: Node, quantization_config: QuantizationConfig) -> None:
     if _is_annotated([node]):

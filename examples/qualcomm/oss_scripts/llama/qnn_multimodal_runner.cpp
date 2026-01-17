@@ -231,11 +231,15 @@ std::string get_formatted_prompt(
       formatted_prompt.append("<|im_end|>assistant\n");
       break;
     case example::MultimodalDecoderModelVersion::kFastvlm:
+      // FastVLM (Qwen2-based) tokenizer's chat template adds a default system
+      // prompt if none is provided. We must match this behavior at runtime.
+      formatted_prompt.append("<|im_start|>system\n");
       if (!system_prompt.empty()) {
-        formatted_prompt.append("<|im_start|>system\n");
         formatted_prompt.append(system_prompt);
-        formatted_prompt.append("<|im_end|>\n");
+      } else {
+        formatted_prompt.append("You are a helpful assistant.");
       }
+      formatted_prompt.append("<|im_end|>\n");
       formatted_prompt.append("<|im_start|>user\n");
       formatted_prompt.append(specials.image_token);
       formatted_prompt.append(prompt);
