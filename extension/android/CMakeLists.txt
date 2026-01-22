@@ -192,6 +192,27 @@ if(EXECUTORCH_BUILD_LLAMA_JNI)
       PRIVATE ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner
     )
     target_compile_definitions(executorch_jni PRIVATE EXECUTORCH_BUILD_QNN=1)
+
+    # QNN Multimodal support (FastVLM, etc.)
+    if(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+      target_sources(
+        executorch_jni
+        PRIVATE
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/encoder.cpp
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/multimodal_runner.cpp
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/embedding_runner.cpp
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/embedding_processor.cpp
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/multimodal_prompt_processor.cpp
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/multimodal_token_generator.cpp
+          ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/multimodal_lhd_token_generator.cpp
+      )
+
+      target_include_directories(
+        executorch_jni
+        PRIVATE ${EXECUTORCH_ROOT}/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner
+      )
+      target_compile_definitions(executorch_jni PRIVATE EXECUTORCH_BUILD_QNN_MULTIMODAL=1)
+    endif()
   endif()
 
   if(NEURON_BUFFER_ALLOCATOR_LIB)

@@ -20,8 +20,11 @@ build_android_native_library() {
   QNN_SDK_ROOT="${QNN_SDK_ROOT:-}"
   if [ -n "$QNN_SDK_ROOT" ]; then
     EXECUTORCH_BUILD_QNN=ON
+    # Enable QNN multimodal by default when QNN is enabled (can be overridden)
+    EXECUTORCH_BUILD_QNN_MULTIMODAL="${EXECUTORCH_BUILD_QNN_MULTIMODAL:-ON}"
   else
     EXECUTORCH_BUILD_QNN=OFF
+    EXECUTORCH_BUILD_QNN_MULTIMODAL=OFF
   fi
 
   NEURON_BUFFER_ALLOCATOR_LIB="${NEURON_BUFFER_ALLOCATOR_LIB:-}"
@@ -46,6 +49,7 @@ build_android_native_library() {
     -DEXECUTORCH_BUILD_NEURON="${EXECUTORCH_BUILD_NEURON}" \
     -DNEURON_BUFFER_ALLOCATOR_LIB="${NEURON_BUFFER_ALLOCATOR_LIB}" \
     -DEXECUTORCH_BUILD_QNN="${EXECUTORCH_BUILD_QNN}" \
+    -DEXECUTORCH_BUILD_QNN_MULTIMODAL="${EXECUTORCH_BUILD_QNN_MULTIMODAL}" \
     -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
     -DEXECUTORCH_BUILD_VULKAN="${EXECUTORCH_BUILD_VULKAN}" \
     -DSUPPORT_REGEX_LOOKAHEAD=ON \
@@ -82,9 +86,11 @@ build_aar() {
     find cmake-out-android-so -type f -name "*.so" -exec "$ANDROID_NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip {} \;
   fi
   pushd extension/android/
-  ANDROID_HOME="${ANDROID_SDK:-/opt/android/sdk}" ./gradlew build
+  # Use ANDROID_HOME if set, otherwise fall back to ANDROID_SDK, then default
+  local ANDROID_HOME_VAL="${ANDROID_HOME:-${ANDROID_SDK:-/opt/android/sdk}}"
+  ANDROID_HOME="${ANDROID_HOME_VAL}" ./gradlew build
   # Use java unit test as sanity check
-  ANDROID_HOME="${ANDROID_SDK:-/opt/android/sdk}" ./gradlew :executorch_android:testDebugUnitTest
+  ANDROID_HOME="${ANDROID_HOME_VAL}" ./gradlew :executorch_android:testDebugUnitTest
   popd
   if [ ! -z $BUILD_AAR_DIR ]; then
     cp extension/android/executorch_android/build/outputs/aar/executorch_android-debug.aar "${BUILD_AAR_DIR}/executorch.aar"

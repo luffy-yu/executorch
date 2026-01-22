@@ -37,10 +37,14 @@ enum MultimodalDecoderModelVersion {
   kFastvlm,
 };
 
+// KvBitWidth may already be defined in runner.h - use that definition if available
+#ifndef KV_BIT_WIDTH_DEFINED
+#define KV_BIT_WIDTH_DEFINED
 enum KvBitWidth {
   kWidth8 = 8,
   kWidth16 = 16,
 };
+#endif
 
 template <typename T>
 class MultimodalRunner : public executorch::extension::llm::IRunner {
@@ -83,6 +87,13 @@ class MultimodalRunner : public executorch::extension::llm::IRunner {
   void reset() override {};
   executorch::runtime::Result<MultimodalDecoderModelVersion>
   get_decoder_model_version();
+
+  // Set the image hidden states for multimodal generation
+  // Must be called after encoding an image and before generate()
+  void set_image_hidden_states(
+      std::unique_ptr<executorch::aten::Tensor> image_hidden_states) {
+    image_hidden_states_ = std::move(image_hidden_states);
+  }
 
   // Multimodal-specific method for merging embeddings
   void merge_multimodal_embeddings(

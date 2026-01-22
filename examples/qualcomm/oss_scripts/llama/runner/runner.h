@@ -44,10 +44,14 @@ enum DecoderModelVersion {
   kGlm,
 };
 
+// Guard against redefinition when both runner.h and multimodal_runner.h are included
+#ifndef KV_BIT_WIDTH_DEFINED
+#define KV_BIT_WIDTH_DEFINED
 enum KvBitWidth {
   kWidth8 = 8,
   kWidth16 = 16,
 };
+#endif
 
 template <typename T>
 class Runner : public executorch::extension::llm::IRunner {

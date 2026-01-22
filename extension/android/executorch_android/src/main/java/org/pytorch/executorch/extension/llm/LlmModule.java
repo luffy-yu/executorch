@@ -27,6 +27,9 @@ public class LlmModule {
   public static final int MODEL_TYPE_TEXT = 1;
   public static final int MODEL_TYPE_TEXT_VISION = 2;
   public static final int MODEL_TYPE_MULTIMODAL = 2;
+  public static final int MODEL_TYPE_MEDIATEK_LLAMA = 3;
+  public static final int MODEL_TYPE_QNN_LLAMA = 4;
+  public static final int MODEL_TYPE_QNN_MULTIMODAL = 5;
 
   private final HybridData mHybridData;
   private static final int DEFAULT_SEQ_LEN = 128;
@@ -324,6 +327,39 @@ public class LlmModule {
 
   // returns status
   private native int appendTextInput(String prompt);
+
+  /**
+   * Encode an image from a raw file for QNN multimodal models.
+   * This is only available when using MODEL_TYPE_QNN_MULTIMODAL.
+   *
+   * @param imagePath Path to the raw image file
+   * @return 0 on success, error code otherwise
+   */
+  @Experimental
+  public int encodeImageFromFile(String imagePath) {
+    return encodeImageFromFileNative(imagePath);
+  }
+
+  private native int encodeImageFromFileNative(String imagePath);
+
+  /**
+   * Encode an image from a preprocessed float array for QNN multimodal models.
+   * This is only available when using MODEL_TYPE_QNN_MULTIMODAL.
+   * The image should be normalized with FastVLM mean/std values.
+   *
+   * @param image Preprocessed image as a float array in NCHW format
+   * @param batch Batch size (typically 1)
+   * @param channels Number of channels (typically 3)
+   * @param height Image height (1024 for FastVLM)
+   * @param width Image width (1024 for FastVLM)
+   * @return 0 on success, error code otherwise
+   */
+  @Experimental
+  public int encodeImage(float[] image, int batch, int channels, int height, int width) {
+    return encodeImageNative(image, batch, channels, height, width);
+  }
+
+  private native int encodeImageNative(float[] image, int batch, int channels, int height, int width);
 
   /**
    * Reset the context of the LLM. This will clear the KV cache and reset the state of the LLM.

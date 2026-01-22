@@ -37,6 +37,11 @@
 #include <executorch/examples/qualcomm/oss_scripts/llama/runner/runner.h>
 #endif
 
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+#include <executorch/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/multimodal_runner.h>
+#include <executorch/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/encoder.h>
+#endif
+
 #if defined(EXECUTORCH_BUILD_MEDIATEK)
 #include <executorch/examples/mediatek/executor_runner/mtk_llama_runner.h>
 #endif
@@ -126,6 +131,11 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
   std::unique_ptr<executorch::extension::llm::MultimodalRunner>
       multi_modal_runner_;
   std::vector<llm::MultimodalInput> prefill_inputs_;
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+  std::unique_ptr<example::MultimodalRunner<uint16_t>> qnn_multimodal_runner_;
+  std::unique_ptr<example::EncoderRunner> encoder_runner_;
+  std::unique_ptr<executorch::aten::Tensor> image_hidden_states_;
+#endif
 
  public:
   constexpr static auto kJavaDescriptor =
@@ -135,6 +145,7 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
   constexpr static int MODEL_TYPE_CATEGORY_MULTIMODAL = 2;
   constexpr static int MODEL_TYPE_MEDIATEK_LLAMA = 3;
   constexpr static int MODEL_TYPE_QNN_LLAMA = 4;
+  constexpr static int MODEL_TYPE_QNN_MULTIMODAL = 5;
 
   static facebook::jni::local_ref<jhybriddata> initHybrid(
       facebook::jni::alias_ref<jclass>,
@@ -172,26 +183,31 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
 
     model_type_category_ = model_type_category;
     std::vector<std::string> data_files_vector;
+
+    // Convert Java List<String> to C++ std::vector<string> for all model types
+    if (data_files != nullptr) {
+      auto list_class = facebook::jni::findClassStatic("java/util/List");
+      auto size_method = list_class->getMethod<jint()>("size");
+      auto get_method =
+          list_class->getMethod<facebook::jni::local_ref<jobject>(jint)>(
+              "get");
+
+      jint size = size_method(data_files);
+      ET_LOG(Info, "JNI: Parsing %d dataFiles entries", size);
+      for (jint i = 0; i < size; ++i) {
+        auto str_obj = get_method(data_files, i);
+        auto jstr = facebook::jni::static_ref_cast<jstring>(str_obj);
+        std::string entry = jstr->toStdString();
+        ET_LOG(Info, "JNI: dataFiles[%d] = %s", i, entry.c_str());
+        data_files_vector.push_back(entry);
+      }
+    }
+
     if (model_type_category == MODEL_TYPE_CATEGORY_MULTIMODAL) {
       multi_modal_runner_ = llm::create_multimodal_runner(
           model_path->toStdString().c_str(),
           llm::load_tokenizer(tokenizer_path->toStdString()));
     } else if (model_type_category == MODEL_TYPE_CATEGORY_LLM) {
-      if (data_files != nullptr) {
-        // Convert Java List<String> to C++ std::vector<string>
-        auto list_class = facebook::jni::findClassStatic("java/util/List");
-        auto size_method = list_class->getMethod<jint()>("size");
-        auto get_method =
-            list_class->getMethod<facebook::jni::local_ref<jobject>(jint)>(
-                "get");
-
-        jint size = size_method(data_files);
-        for (jint i = 0; i < size; ++i) {
-          auto str_obj = get_method(data_files, i);
-          auto jstr = facebook::jni::static_ref_cast<jstring>(str_obj);
-          data_files_vector.push_back(jstr->toStdString());
-        }
-      }
       runner_ = executorch::extension::llm::create_text_llm_runner(
           model_path->toStdString(),
           llm::load_tokenizer(tokenizer_path->toStdString()),
@@ -212,6 +228,94 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
           "",
           "");
       model_type_category_ = MODEL_TYPE_CATEGORY_LLM;
+#endif
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+    } else if (model_type_category == MODEL_TYPE_QNN_MULTIMODAL) {
+      // Parse data_files for encoder_path, embedding_path, and config
+      // Expected format in data_files:
+      // [0]: encoder_path
+      // [1]: embedding_path
+      // [2]: config string (decoder_model_version:fastvlm_0_5b;eval_mode:1)
+      std::string encoder_path;
+      std::string embedding_path;
+      std::string decoder_model_version = "fastvlm_0_5b";
+      int eval_mode = 1;
+
+      if (data_files_vector.size() >= 1) {
+        encoder_path = data_files_vector[0];
+      }
+      if (data_files_vector.size() >= 2) {
+        embedding_path = data_files_vector[1];
+      }
+      if (data_files_vector.size() >= 3) {
+        // Parse config string
+        std::string config = data_files_vector[2];
+        // Parse decoder_model_version
+        size_t pos = config.find("decoder_model_version:");
+        if (pos != std::string::npos) {
+          size_t end = config.find(";", pos);
+          decoder_model_version = config.substr(pos + 22,
+              end == std::string::npos ? std::string::npos : end - pos - 22);
+        }
+        // Parse eval_mode
+        pos = config.find("eval_mode:");
+        if (pos != std::string::npos) {
+          eval_mode = std::stoi(config.substr(pos + 10, 1));
+        }
+      }
+
+      ET_LOG(Info, "QNN Multimodal: decoder=%s, encoder=%s, embedding=%s, model=%s, eval_mode=%d",
+             model_path->toStdString().c_str(),
+             encoder_path.c_str(),
+             embedding_path.c_str(),
+             decoder_model_version.c_str(),
+             eval_mode);
+
+      // Validate paths are not empty
+      if (encoder_path.empty()) {
+        ET_LOG(Error, "Encoder path is empty - check dataFiles[0]");
+        throw std::runtime_error("Encoder path is empty for QNN multimodal");
+      }
+      if (embedding_path.empty()) {
+        ET_LOG(Error, "Embedding path is empty - check dataFiles[1]");
+        throw std::runtime_error("Embedding path is empty for QNN multimodal");
+      }
+
+      // Create encoder runner
+      ET_LOG(Info, "Creating encoder runner with path: %s", encoder_path.c_str());
+      encoder_runner_ = std::make_unique<example::EncoderRunner>(encoder_path);
+
+      // Create embedding module
+      std::unique_ptr<executorch::extension::Module> embedding_module =
+          std::make_unique<executorch::extension::Module>(
+              embedding_path.c_str(),
+              executorch::extension::Module::LoadMode::MmapUseMlockIgnoreErrors);
+
+      // Create decoder module
+      std::unique_ptr<executorch::extension::Module> decoder_module =
+          std::make_unique<executorch::extension::Module>(
+              model_path->toStdString().c_str(),
+              executorch::extension::Module::LoadMode::MmapUseMlockIgnoreErrors);
+
+      // Create QNN multimodal runner (image_hidden_states will be set later)
+      ET_LOG(Info, "Creating QNN multimodal runner...");
+      qnn_multimodal_runner_ = std::make_unique<example::MultimodalRunner<uint16_t>>(
+          std::move(decoder_module),
+          std::move(embedding_module),
+          decoder_model_version.c_str(),
+          model_path->toStdString().c_str(),
+          tokenizer_path->toStdString().c_str(),
+          "", // performance_output_path
+          "", // dump_logits_path
+          temperature,
+          eval_mode,
+          false, // shared_buffer
+          0, // ngram
+          0, // window
+          0, // gcap
+          nullptr); // image_hidden_states set during generate
+      model_type_category_ = MODEL_TYPE_QNN_MULTIMODAL;
+      ET_LOG(Info, "QNN multimodal runner created successfully");
 #endif
 #if defined(EXECUTORCH_BUILD_MEDIATEK)
     } else if (model_type_category == MODEL_TYPE_MEDIATEK_LLAMA) {
@@ -256,6 +360,29 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
           config,
           [callback](std::string result) { callback->onResult(result); },
           [callback](const llm::Stats& result) { callback->onStats(result); });
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+    } else if (model_type_category_ == MODEL_TYPE_QNN_MULTIMODAL) {
+      // Check if image has been encoded
+      if (image_hidden_states_ == nullptr) {
+        ET_LOG(Error, "No image has been encoded. Call encodeImageFromFile first.");
+        return static_cast<jint>(Error::InvalidState);
+      }
+
+      // Pass the encoded image hidden states to the runner
+      qnn_multimodal_runner_->set_image_hidden_states(std::move(image_hidden_states_));
+
+      executorch::extension::llm::GenerationConfig config{
+          .echo = static_cast<bool>(echo),
+          .seq_len = seq_len,
+          .temperature = temperature_,
+      };
+
+      qnn_multimodal_runner_->generate(
+          prompt->toStdString(),
+          config,
+          [callback](const std::string& result) { callback->onResult(result); },
+          [callback](const llm::Stats& result) { callback->onStats(result); });
+#endif
     }
     return 0;
   }
@@ -318,6 +445,86 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
 
     return 0;
   }
+
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+  // Encode image from raw file for QNN multimodal
+  // This loads a pre-processed .raw image file and runs the encoder
+  jint encode_image_from_file(facebook::jni::alias_ref<jstring> image_path) {
+    if (model_type_category_ != MODEL_TYPE_QNN_MULTIMODAL || encoder_runner_ == nullptr) {
+      ET_LOG(Error, "encode_image_from_file only supported for QNN multimodal");
+      return static_cast<jint>(Error::InvalidArgument);
+    }
+
+    std::string path = image_path->toStdString();
+    ET_LOG(Info, "Encoding image from file: %s", path.c_str());
+
+    auto result = encoder_runner_->encode_from_file(path);
+    if (!result.ok()) {
+      ET_LOG(Error, "Failed to encode image from file");
+      return static_cast<jint>(result.error());
+    }
+
+    // Store the image hidden states for use in generation
+    image_hidden_states_ = std::make_unique<executorch::aten::Tensor>(result.get());
+    ET_LOG(Info, "Image encoded successfully, hidden states stored");
+    return 0;
+  }
+
+  // Encode image from normalized float array for QNN multimodal
+  // Image should be preprocessed: resized to 1024x1024, normalized with FastVLM mean/std
+  // Shape: [batch, channels, height, width] = [1, 3, 1024, 1024]
+  jint encode_image(
+      facebook::jni::alias_ref<jfloatArray> image,
+      jint batch,
+      jint channels,
+      jint height,
+      jint width) {
+    if (model_type_category_ != MODEL_TYPE_QNN_MULTIMODAL || encoder_runner_ == nullptr) {
+      ET_LOG(Error, "encode_image only supported for QNN multimodal");
+      return static_cast<jint>(Error::InvalidArgument);
+    }
+
+    if (image == nullptr) {
+      ET_LOG(Error, "Image array is null");
+      return static_cast<jint>(Error::InvalidArgument);
+    }
+
+    auto image_size = image->size();
+    int64_t expected_size = batch * channels * height * width;
+    if (image_size != expected_size) {
+      ET_LOG(Error, "Image size mismatch: expected %ld but got %zu", expected_size, image_size);
+      return static_cast<jint>(Error::InvalidArgument);
+    }
+
+    // Copy image data
+    std::vector<jfloat> image_data_jfloat(image_size);
+    image->getRegion(0, image_size, image_data_jfloat.data());
+
+    // Create vector of float for the image data
+    std::vector<float> image_buffer(image_data_jfloat.begin(), image_data_jfloat.end());
+
+    ET_LOG(Info, "Encoding image: batch=%d, channels=%d, height=%d, width=%d, numel=%zu",
+           batch, channels, height, width, image_size);
+
+    // Create tensor from buffer
+    executorch::extension::TensorPtr tensor = executorch::extension::from_blob(
+        image_buffer.data(),
+        std::vector<int32_t>{batch, channels, height, width},
+        executorch::aten::ScalarType::Float);
+
+    // Encode the tensor
+    auto result = encoder_runner_->encode(tensor);
+    if (!result.ok()) {
+      ET_LOG(Error, "Failed to encode image");
+      return static_cast<jint>(result.error());
+    }
+
+    // Store the image hidden states for use in generation
+    image_hidden_states_ = std::make_unique<executorch::aten::Tensor>(result.get());
+    ET_LOG(Info, "Image encoded successfully from array, hidden states stored");
+    return 0;
+  }
+#endif
 
   // Returns status_code
   jint append_audio_input(
@@ -394,6 +601,10 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
       multi_modal_runner_->stop();
     } else if (model_type_category_ == MODEL_TYPE_CATEGORY_LLM) {
       runner_->stop();
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+    } else if (model_type_category_ == MODEL_TYPE_QNN_MULTIMODAL) {
+      qnn_multimodal_runner_->stop();
+#endif
     }
   }
 
@@ -404,6 +615,11 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
     if (multi_modal_runner_ != nullptr) {
       multi_modal_runner_->reset();
     }
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+    if (qnn_multimodal_runner_ != nullptr) {
+      qnn_multimodal_runner_->reset();
+    }
+#endif
   }
 
   jint load() {
@@ -420,10 +636,43 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
       if (result != 0) {
         ss << "Failed to load llm runner: [" << result << "]";
       }
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+    } else if (model_type_category_ == MODEL_TYPE_QNN_MULTIMODAL) {
+      result = 0; // Start with success
+      // Load encoder first
+      if (encoder_runner_ != nullptr) {
+        ET_LOG(Info, "Loading encoder runner...");
+        auto encoder_result = encoder_runner_->load();
+        if (encoder_result != executorch::runtime::Error::Ok) {
+          ss << "Failed to load encoder runner";
+          result = static_cast<jint>(encoder_result);
+          ET_LOG(Error, "Encoder runner load failed: %d", result);
+        } else {
+          ET_LOG(Info, "Encoder runner loaded successfully");
+        }
+      } else {
+        ET_LOG(Info, "Encoder runner is null, skipping encoder load");
+      }
+      // Then load the multimodal runner (only if encoder loaded successfully or was null)
+      if (result == 0 && qnn_multimodal_runner_ != nullptr) {
+        ET_LOG(Info, "Loading QNN multimodal runner...");
+        result = static_cast<jint>(qnn_multimodal_runner_->load());
+        if (result != 0) {
+          ss << "Failed to load QNN multimodal runner: [" << result << "]";
+          ET_LOG(Error, "QNN multimodal runner load failed: %d", result);
+        } else {
+          ET_LOG(Info, "QNN multimodal runner loaded successfully");
+        }
+      } else if (qnn_multimodal_runner_ == nullptr) {
+        ss << "QNN multimodal runner is null";
+        result = static_cast<jint>(Error::InvalidState);
+        ET_LOG(Error, "QNN multimodal runner is null");
+      }
+#endif
     } else {
       ss << "Invalid model type category: " << model_type_category_
-         << ". Valid values are: " << MODEL_TYPE_CATEGORY_LLM << " or "
-         << MODEL_TYPE_CATEGORY_MULTIMODAL;
+         << ". Valid values are: " << MODEL_TYPE_CATEGORY_LLM << ", "
+         << MODEL_TYPE_CATEGORY_MULTIMODAL << ", or " << MODEL_TYPE_QNN_MULTIMODAL;
     }
     if (result != 0) {
       executorch::jni_helper::throwExecutorchException(
@@ -453,6 +702,12 @@ class ExecuTorchLlmJni : public facebook::jni::HybridClass<ExecuTorchLlmJni> {
         makeNativeMethod(
             "appendTextInput", ExecuTorchLlmJni::append_text_input),
         makeNativeMethod("resetContext", ExecuTorchLlmJni::reset_context),
+#if defined(EXECUTORCH_BUILD_QNN_MULTIMODAL)
+        makeNativeMethod(
+            "encodeImageFromFileNative", ExecuTorchLlmJni::encode_image_from_file),
+        makeNativeMethod(
+            "encodeImageNative", ExecuTorchLlmJni::encode_image),
+#endif
     });
   }
 };
