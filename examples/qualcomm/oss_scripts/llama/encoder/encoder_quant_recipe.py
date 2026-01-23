@@ -80,28 +80,29 @@ class SmolVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
 class FastVLM_Encoder_QuantRecipe(EncoderQuantRecipe):
     """
     Quantization recipe for FastVLM vision encoder (FastViTHD).
-    Uses 16a8w (16-bit activations, 8-bit weights) quantization - same as SmolVLM/InternVL3.
-    8-bit weights have better HTP optimization support than 16-bit.
+    Uses 16a16w (16-bit activations, 16-bit weights) quantization for better accuracy.
+    FastViTHD is more sensitive to quantization than other vision encoders,
+    so we use higher precision (16-bit weights) to maintain output quality.
     """
-    default_quant_dtype = QuantDtype.use_16a8w
+    default_quant_dtype = QuantDtype.use_16a16w
 
     def __init__(self, verbose: bool = False):
         super().__init__()
 
-        # Use 16a8w like other vision encoders (SmolVLM, InternVL3)
-        # 8-bit weights are better optimized on HTP than 16-bit
+        # Use 16a16w for FastVLM - it's more sensitive to quantization than SmolVLM/InternVL3
+        # 16-bit weights preserve more accuracy for FastViTHD architecture
         self.recipe = QuantRecipe(
             self.default_quant_dtype,
             False,
-            act_observer=MinMaxObserver,
+            act_observer=HistogramObserver,  # Better calibration for accuracy
             granularity=QuantGranularity.PER_TENSOR,
             verbose=verbose,
         ).add_node_target(
             {
                 torch.ops.aten.linear.default,
             },
-            QuantDtype.use_16a8w,
+            QuantDtype.use_16a16w,
             False,
-            act_observer=MinMaxObserver,
+            act_observer=HistogramObserver,
             granularity=QuantGranularity.PER_CHANNEL,
         )
