@@ -10,6 +10,17 @@ set(CUSTOM_OP_SRCS_FILE
 )
 set(EXECUTORCH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../..)
 
+# stb_image: a lightweight library to load images (JPG, PNG, BMP, etc.)
+include(FetchContent)
+FetchContent_Declare(
+  stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG f0569113c93ad095470c54bf34a17b36646bbbb5
+)
+FetchContent_MakeAvailable(stb)
+# Add deprecated/ to use stb_image_resize.h for internal compatibility
+set(_stb_include_directories ${stb_SOURCE_DIR} ${stb_SOURCE_DIR}/deprecated)
+
 add_library(custom_ops ${CUSTOM_OP_SRCS_FILE})
 target_include_directories(custom_ops PUBLIC "${_common_include_directories}")
 target_include_directories(
@@ -117,6 +128,10 @@ target_include_directories(
 )
 target_include_directories(
   qnn_multimodal_runner PUBLIC ${EXECUTORCH_ROOT}/extension/llm/tokenizers/include
+)
+# Add stb_image include directories for image loading support
+target_include_directories(
+  qnn_multimodal_runner PUBLIC ${_stb_include_directories}
 )
 target_compile_options(qnn_multimodal_runner PUBLIC ${_common_compile_options})
 
