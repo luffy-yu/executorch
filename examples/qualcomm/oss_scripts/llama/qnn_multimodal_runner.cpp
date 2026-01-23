@@ -19,11 +19,14 @@
 #include <executorch/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/multimodal_runner.h>
 #include <executorch/extension/llm/runner/image.h>
 #include <executorch/extension/llm/runner/irunner.h>
+#include <executorch/extension/llm/runner/util.h>
 #include <executorch/runtime/platform/log.h>
 #include <gflags/gflags.h>
 
 #include <fstream>
 #include <vector>
+
+using executorch::extension::llm::time_in_ms;
 
 // Model paths
 DEFINE_string(
@@ -264,6 +267,7 @@ void start_multimodal_runner(
     std::unique_ptr<executorch::extension::Module> embedding,
     std::vector<std::string>& prompts) {
   ET_LOG(Info, "Starting multimodal runner");
+  long pipeline_start_ms = time_in_ms();
 
   bool use_tokenized_prompt =
       gflags::GetCommandLineFlagInfoOrDie("tokenized_prompt").is_default ? false
@@ -274,18 +278,30 @@ void start_multimodal_runner(
   bool has_image = !FLAGS_image_path.empty();
 
   // Load encoder
+  long encoder_load_start_ms = time_in_ms();
   if (encoder_runner->load() != executorch::runtime::Error::Ok) {
     ET_LOG(Error, "Failed to load encoder");
     return;
   }
+  long encoder_load_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Encoder model load: %ld ms",
+      encoder_load_end_ms - encoder_load_start_ms);
 
   // Encode image from file
+  long encode_start_ms = time_in_ms();
   auto encode_result =
       encoder_runner->encode_from_file(FLAGS_image_path.c_str());
+  long encode_end_ms = time_in_ms();
   if (!encode_result.ok()) {
     ET_LOG(Error, "Failed to encode image");
     return;
   }
+  ET_LOG(
+      Info,
+      "[TIMING] Image encoding (load + preprocess + forward): %ld ms",
+      encode_end_ms - encode_start_ms);
 
   auto image_hidden_states = encode_result.get();
 
@@ -352,6 +368,16 @@ void start_multimodal_runner(
   }
   fout.write(buf.data(), buf.size());
   fout.close();
+
+  long pipeline_end_ms = time_in_ms();
+  ET_LOG(Info, "");
+  ET_LOG(Info, "========================================");
+  ET_LOG(Info, "[TIMING SUMMARY]");
+  ET_LOG(
+      Info,
+      "  Total pipeline time: %ld ms",
+      pipeline_end_ms - pipeline_start_ms);
+  ET_LOG(Info, "========================================");
 }
 
 int main(int argc, char** argv) {

@@ -7,8 +7,10 @@
  */
 
 #include <executorch/examples/qualcomm/oss_scripts/llama/runner/multimodal_runner/encoder.h>
+#include <executorch/extension/llm/runner/util.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 
@@ -20,6 +22,7 @@
 using executorch::aten::Tensor;
 using executorch::extension::Module;
 using executorch::extension::TensorPtr;
+using executorch::extension::llm::time_in_ms;
 using executorch::runtime::Error;
 using executorch::runtime::MethodMeta;
 using executorch::runtime::Result;
@@ -262,7 +265,14 @@ Result<Tensor> EncoderRunner::encode(TensorPtr& image_tensor) {
   std::vector<executorch::runtime::EValue> encoder_inputs;
   encoder_inputs.emplace_back(*tensor_ptr);
 
+  long encoder_start_ms = time_in_ms();
   auto encoder_result = module_->forward(encoder_inputs);
+  long encoder_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Vision encoder forward: %ld ms",
+      encoder_end_ms - encoder_start_ms);
+
   ET_CHECK_MSG(encoder_result.ok(), "Encoder execution failed");
 
   auto encoder_output = encoder_result.get();
@@ -275,6 +285,9 @@ Result<Tensor> EncoderRunner::encode(TensorPtr& image_tensor) {
 Result<Tensor> EncoderRunner::encode_from_file(
     const std::string& image_file_path) {
   ET_CHECK_MSG(is_method_loaded(), "Encoder method not loaded");
+
+  long total_start_ms = time_in_ms();
+  long image_load_start_ms = time_in_ms();
 
   // Get input tensor metadata
   Result<MethodMeta> method_meta = module_->method_meta(kEncoderForwardName);
@@ -357,6 +370,12 @@ Result<Tensor> EncoderRunner::encode_from_file(
     file.close();
   }
 
+  long image_load_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Image load and preprocess: %ld ms",
+      image_load_end_ms - image_load_start_ms);
+
   // DEBUG: Print input statistics
   float min_val = buffer[0], max_val = buffer[0];
   double sum = 0.0, sum_sq = 0.0;
@@ -435,6 +454,12 @@ Result<Tensor> EncoderRunner::encode_from_file(
       ET_LOG(Info, "[DEBUG] Saved runtime vision output to debug_runtime_vision_output.raw");
     }
   }
+
+  long total_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Total encode_from_file: %ld ms",
+      total_end_ms - total_start_ms);
 
   return result;
 }

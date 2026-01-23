@@ -644,7 +644,13 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
     }
   }
 
+  long text_embedding_start_ms = time_in_ms();
   embedding_processor_->prefill(tokens_for_embedding);
+  long text_embedding_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Text embedding generation: %ld ms",
+      text_embedding_end_ms - text_embedding_start_ms);
   const TensorStruct<float>& text_embeddings =
       embedding_processor_->get_prompt_embeddings();
   int64_t embedding_dim = text_embeddings.tensor->size(2);
@@ -723,8 +729,14 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
 
   ET_LOG(Info, "Merging text embeddings with image hidden states");
   // Use original prompt_tokens (with -200) for finding placeholder positions
+  long embedding_merge_start_ms = time_in_ms();
   merge_multimodal_embeddings(
       prompt_tokens, text_embeddings, placeholder_token_id);
+  long embedding_merge_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Embedding merge: %ld ms",
+      embedding_merge_end_ms - embedding_merge_start_ms);
 
   // DEBUG: Save and print merged embeddings statistics
   {
@@ -762,8 +774,15 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
     }
   }
 
+  long prefill_start_ms = time_in_ms();
   auto prefill_res =
       prompt_processor_->prefill(merged_embeddings_, cur_pos_, dump_logits);
+  long prefill_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Prefill forward pass: %ld ms",
+      prefill_end_ms - prefill_start_ms);
+
   ET_CHECK_OK_OR_RETURN_ERROR(prefill_res.error());
   uint64_t cur_token = prefill_res.get();
   cur_pos_ += num_prompt_tokens;
@@ -787,6 +806,8 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
   // Requant kv cache for prefill decode I/O
   if (eval_mode_ == EvalMode::kLookaheadDecoding ||
       eval_mode_ == EvalMode::kHybrid) {
+    long kv_requant_start_ms = time_in_ms();
+
     int64_t num_heads = prompt_processor_->get_num_heads();
     int64_t num_layers = prompt_processor_->get_num_layers();
     int64_t head_dim = kv_manager_->get_head_dim();
@@ -822,11 +843,27 @@ Error MultimodalRunner<T>::generate_from_prompt_or_file(
             input_v_cache_zero_points_[layer_idx]);
       }
     }
+
+    long kv_requant_end_ms = time_in_ms();
+    ET_LOG(
+        Info,
+        "[TIMING] KV cache requantization: %ld ms",
+        kv_requant_end_ms - kv_requant_start_ms);
   }
 
+  long token_gen_start_ms = time_in_ms();
   int64_t num_generated_tokens = ET_UNWRAP(token_generator_->generate(
       prompt_tokens, cur_pos_, seq_len, token_callback, dump_logits));
   stats_.inference_end_ms = time_in_ms();
+  ET_LOG(
+      Info,
+      "[TIMING] Token generation (%ld tokens): %ld ms (%.2f ms/token)",
+      num_generated_tokens,
+      stats_.inference_end_ms - token_gen_start_ms,
+      num_generated_tokens > 0
+          ? static_cast<double>(stats_.inference_end_ms - token_gen_start_ms) /
+                num_generated_tokens
+          : 0.0);
   ET_LOG(
       Info,
       "RSS after finishing text generation: %f MiB (0 if unsupported)",
