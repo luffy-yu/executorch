@@ -17,7 +17,12 @@ from multiprocessing.connection import Client
 from typing import Dict
 
 import torch
+from executorch.backends.qualcomm.serialization.qc_schema import (
+    QnnExecuTorchBackendType,
+    QnnExecuTorchGpuPrecision,
+)
 from executorch.backends.qualcomm.utils.utils import (
+    generate_gpu_compiler_spec,
     generate_htp_compiler_spec,
     generate_qnn_executorch_compiler_spec,
     get_soc_to_chipset_map,
@@ -47,6 +52,7 @@ from executorch.examples.qualcomm.oss_scripts.llama.wrappers import (
     next_power_of_two,
 )
 from executorch.examples.qualcomm.utils import (
+    get_backend_type,
     make_output_dir,
     setup_common_args_and_variables,
     SimpleADB,
@@ -92,6 +98,9 @@ def compile(
         TEXT_DECODER: None,
     }
     is_modality = False
+    # Get backend type from args (default is htp)
+    encoder_backend = get_backend_type(getattr(args, 'backend', 'htp'))
+
     # compile spec for multimodlity encoder
     for modality in compile_specs:
         if not hasattr(decoder_model_config, modality):
@@ -102,13 +111,33 @@ def compile(
         encoder_config = getattr(decoder_model_config, modality)
         use_fp16_for_encoder = encoder_config.quant_recipe is None
 
-        backend_options = generate_htp_compiler_spec(
-            use_fp16=use_fp16_for_encoder,
+        # Check if GPU backend is requested for vision encoder
+        use_gpu_for_encoder = (
+            modality == VISION_ENCODER
+            and encoder_backend == QnnExecuTorchBackendType.kGpuBackend
         )
-        encoder_compile_specs = generate_qnn_executorch_compiler_spec(
-            soc_model=get_soc_to_chipset_map()[args.model],
-            backend_options=backend_options,
-        )
+
+        if use_gpu_for_encoder:
+            # GPU backend with FP16 precision - no quantization needed
+            # GPU backend requires online_prepare=True for on-device graph composition
+            logging.info(f"[{modality}] Using GPU backend with FP16 precision (online_prepare=True)")
+            backend_options = generate_gpu_compiler_spec(
+                precision=QnnExecuTorchGpuPrecision.kGpuPrecisionFp16,
+            )
+            encoder_compile_specs = generate_qnn_executorch_compiler_spec(
+                soc_model=get_soc_to_chipset_map()[args.model],
+                backend_options=backend_options,
+                online_prepare=True,  # Required for GPU backend
+            )
+        else:
+            # HTP backend (default)
+            backend_options = generate_htp_compiler_spec(
+                use_fp16=use_fp16_for_encoder,
+            )
+            encoder_compile_specs = generate_qnn_executorch_compiler_spec(
+                soc_model=get_soc_to_chipset_map()[args.model],
+                backend_options=backend_options,
+            )
         compile_specs[modality] = encoder_compile_specs
         is_modality = True
 

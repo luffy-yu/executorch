@@ -72,7 +72,9 @@ class SEBlock(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Apply forward pass."""
         b, c, h, w = inputs.size()
-        x = F.avg_pool2d(inputs, kernel_size=[h, w])
+        # Use torch.mean for global average pooling instead of F.avg_pool2d with dynamic kernel
+        # This is more portable across backends (Vulkan doesn't support dynamic kernel sizes)
+        x = torch.mean(inputs, dim=[2, 3], keepdim=True)
         x = self.reduce(x)
         x = F.relu(x)
         x = self.expand(x)
