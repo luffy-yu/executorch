@@ -464,6 +464,20 @@ class FastVLMVisionEncoder(torch.nn.Module):
             # Fallback to regular torch load
             state_dict = torch.load(checkpoint_path, map_location='cpu')
 
+        # Check if this is MLX quantized format (has int8 weights)
+        is_mlx_quantized = any(v.dtype == torch.int8 for v in state_dict.values())
+
+        # Helper function to dequantize MLX int8 weights
+        def dequantize_mlx_weight(weight, scales, biases, group_size=64):
+            """Dequantize MLX int8 weight to float32."""
+            out_features, in_features = weight.shape
+            num_groups = scales.shape[1]
+            weight_grouped = weight.view(out_features, num_groups, group_size).float()
+            scales_expanded = scales.unsqueeze(-1).float()
+            biases_expanded = biases.unsqueeze(-1).float()
+            dequantized = weight_grouped * scales_expanded + biases_expanded
+            return dequantized.view(out_features, in_features)
+
         # Convert bfloat16/float16 weights to float32 (QNN backend doesn't support bfloat16/float16)
         for key in state_dict:
             if state_dict[key].dtype == torch.bfloat16 or state_dict[key].dtype == torch.float16:
@@ -474,17 +488,65 @@ class FastVLMVisionEncoder(torch.nn.Module):
         projector_state_dict = {}
 
         for key, value in state_dict.items():
-            if 'vision_tower.vision_tower' in key:
-                # Remove 'model.vision_tower.vision_tower.model.' prefix
-                if key.startswith('model.vision_tower.vision_tower.model.'):
+            # Handle vision tower weights
+            if 'vision_tower' in key:
+                # Skip MLX quantization parameters (handled with their weights)
+                if key.endswith('.scales') or (key.endswith('.biases') and '.bn.' not in key):
+                    continue
+
+                # MLX format: vision_tower.model.vision_tower.model.*
+                if key.startswith('vision_tower.model.vision_tower.model.'):
+                    new_key = key[len('vision_tower.model.vision_tower.model.'):]
+                    original_key_base = 'vision_tower.model.vision_tower.model.'
+                # Original format: model.vision_tower.vision_tower.model.*
+                elif key.startswith('model.vision_tower.vision_tower.model.'):
                     new_key = key[len('model.vision_tower.vision_tower.model.'):]
+                    original_key_base = 'model.vision_tower.vision_tower.model.'
                 elif key.startswith('vision_tower.vision_tower.model.'):
                     new_key = key[len('vision_tower.vision_tower.model.'):]
+                    original_key_base = 'vision_tower.vision_tower.model.'
                 elif key.startswith('vision_tower.vision_tower.'):
                     new_key = key[len('vision_tower.vision_tower.'):]
+                    original_key_base = 'vision_tower.vision_tower.'
                 else:
                     continue
+
+                # Dequantize int8 vision tower weights
+                if is_mlx_quantized and value.dtype == torch.int8 and key.endswith('.weight'):
+                    scales_key = key.replace('.weight', '.scales')
+                    biases_key = key.replace('.weight', '.biases')
+                    if scales_key in state_dict and biases_key in state_dict:
+                        scales = state_dict[scales_key].float()
+                        biases = state_dict[biases_key].float()
+                        value = dequantize_mlx_weight(value, scales, biases, group_size=64)
+                        print(f"Dequantized vision {new_key}: shape={value.shape}")
+
                 vision_state_dict[new_key] = value
+            # Handle projector weights (MLX format: multi_modal_projector.linear_*)
+            elif 'multi_modal_projector' in key:
+                # MLX format uses linear_0, linear_2 instead of 0, 2
+                if key.startswith('multi_modal_projector.linear_'):
+                    parts = key.split('.')
+                    layer_name = parts[1]  # linear_0 or linear_2
+                    layer_num = layer_name.replace('linear_', '')
+                    rest = '.'.join(parts[2:])
+                    # Skip quantization parameters (scales, biases - handled below)
+                    if rest in ['scales', 'biases']:
+                        continue
+                    new_key = f"{layer_num}.{rest}"
+
+                    # Dequantize int8 weights if MLX quantized
+                    if is_mlx_quantized and rest == 'weight' and value.dtype == torch.int8:
+                        scales_key = f"multi_modal_projector.{layer_name}.scales"
+                        biases_key = f"multi_modal_projector.{layer_name}.biases"
+                        if scales_key in state_dict and biases_key in state_dict:
+                            scales = state_dict[scales_key].float()
+                            biases = state_dict[biases_key].float()
+                            value = dequantize_mlx_weight(value, scales, biases, group_size=64)
+                            print(f"Dequantized projector {layer_name}.weight: {value.shape}")
+
+                    projector_state_dict[new_key] = value
+            # Handle projector weights (original format: mm_projector.*)
             elif 'mm_projector' in key:
                 # Remove 'model.mm_projector.' prefix
                 if key.startswith('model.mm_projector.'):
@@ -513,7 +575,7 @@ class FastVLMVisionEncoder(torch.nn.Module):
                 print(f"Warning: Unexpected keys in vision tower: {len(unexpected)} keys")
                 print(f"First few: {list(unexpected)[:5]}")
         else:
-            print("Warning: No vision tower weights found in checkpoint with prefix 'vision_tower.vision_tower.'")
+            print("Warning: No vision tower weights found in checkpoint")
 
         # CRITICAL: Reparameterize ConvFFN modules AFTER loading weights
         # This fuses the BatchNorm layers (with their loaded running_mean/var) into Conv2d
@@ -529,7 +591,7 @@ class FastVLMVisionEncoder(torch.nn.Module):
             if unexpected:
                 print(f"Warning: Unexpected keys in projector: {unexpected}")
         else:
-            print("Warning: No projector weights found in checkpoint with prefix 'mm_projector.'")
+            print("Warning: No projector weights found in checkpoint")
 
     def _prepare_model_for_checkpoint(self, checkpoint_keys):
         """

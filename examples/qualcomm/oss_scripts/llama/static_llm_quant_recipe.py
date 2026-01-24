@@ -666,13 +666,15 @@ class SmolVLMQuantRecipe(StaticLLMQuantRecipe):
 class FastVLMQuantRecipe(StaticLLMQuantRecipe):
     """
     Quantization recipe for FastVLM text decoder.
-    Based on Qwen2 architecture, using 16a4w quantization.
+    Based on Qwen2 architecture. Uses the same quantization approach as
+    Qwen2.5-0.5B (16a4w with block quantization) for optimal accuracy.
     """
     default_quant_dtype = QuantDtype.use_16a4w
 
     def __init__(self, verbose: bool = False):
         super().__init__()
 
+        # Use the same quantization recipe as Qwen2.5-0.5B
         self.recipe = QuantRecipe(
             self.default_quant_dtype,
             False,

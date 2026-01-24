@@ -68,9 +68,11 @@ class DatasetBuilder:
 
         # Process image with text prompt using HuggingFace processor
         # Some HF processors (e.g. InternVL3) need to pass text arg or it will cause error and process failed
-        # FastVLM uses a custom CLIPImageProcessor with specific normalization settings
+        # FastVLM uses CLIPImageProcessor with specific normalization settings
         if "FastVLM" in self.repo_id or "fastvlm" in self.repo_id.lower():
-            # FastVLM uses CLIPImageProcessor with no normalization (mean=0, std=1)
+            # FastVLM uses CLIPImageProcessor
+            # Note: The normalization should be handled inside the vision encoder's first Conv/BatchNorm layer
+            # So we keep the raw [0,1] pixel values here
             from transformers import CLIPImageProcessor
 
             processor = CLIPImageProcessor(
@@ -78,7 +80,7 @@ class DatasetBuilder:
                     "height": config.img_resized_h,
                     "width": config.img_resized_w,
                 },
-                image_mean=[0.0, 0.0, 0.0],
+                image_mean=[0.0, 0.0, 0.0],  # No normalization (raw [0,1] values)
                 image_std=[1.0, 1.0, 1.0],
                 size={"shortest_edge": config.img_resized_h},
                 do_rescale=True,

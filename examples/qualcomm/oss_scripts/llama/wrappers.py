@@ -308,7 +308,9 @@ class TextDecoder(Component):
                 from executorch.examples.models.fastvlm.convert_weights import fastvlm_tune_to_meta
                 from executorch.examples.models.smollm3.convert_weights import load_checkpoint
                 raw_state_dict = load_checkpoint(self.config.repo_id)
-                state_dict = fastvlm_tune_to_meta(raw_state_dict)
+                # Pass config path for MLX quantization info
+                config_path = os.path.join(self.config.repo_id, "config.json")
+                state_dict = fastvlm_tune_to_meta(raw_state_dict, config_path)
                 # Convert bfloat16 to float32 for QNN backend
                 for key in state_dict:
                     if state_dict[key].dtype == torch.bfloat16:
@@ -509,12 +511,17 @@ class TextDecoder(Component):
                 safetensor_path = os.path.join(self.config.repo_id, "model.safetensors")
                 if os.path.exists(safetensor_path):
                     checkpoint = load_file(safetensor_path)
-                    embed_weights = checkpoint.get("model.embed_tokens.weight", None)
+                    # Try different key formats:
+                    # - MLX format: language_model.model.embed_tokens.weight
+                    # - Original format: model.embed_tokens.weight
+                    embed_weights = checkpoint.get("language_model.model.embed_tokens.weight", None)
+                    if embed_weights is None:
+                        embed_weights = checkpoint.get("model.embed_tokens.weight", None)
                 else:
                     raise FileNotFoundError(f"Could not find FastVLM checkpoint at {safetensor_path}")
 
                 if embed_weights is None:
-                    raise ValueError("Could not find embedding weights in FastVLM checkpoint")
+                    raise ValueError("Could not find embedding weights in FastVLM checkpoint (tried 'language_model.model.embed_tokens.weight' and 'model.embed_tokens.weight')")
 
                 # Create embedding layer
                 embed_layer = torch.nn.Embedding(
