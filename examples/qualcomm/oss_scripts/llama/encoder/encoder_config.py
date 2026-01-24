@@ -114,5 +114,7 @@ class FastVLMEncoder(VisionModalityConfig):
     img_resized_h = 1024
     img_resized_w = 1024
     img_url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-    # Re-enabled quantization for HTP acceleration (FP16 mode was ~32 seconds, quantized should be ~100-200ms)
-    quant_recipe = FastVLM_Encoder_QuantRecipe
+    # Disable quantization for vision encoder - quantization causes numerical issues
+    # The vision encoder produces different output at QNN runtime vs compile-time when quantized
+    # FP16 mode is slower but produces correct results
+    quant_recipe = None
