@@ -106,7 +106,13 @@ class FastVLMEncoder(VisionModalityConfig):
     - Output dim: 3072 (before MLP projection to 896)
     - Number of patches: 16x16 = 256
 
-    Note: Using 16a16w quantization for best accuracy with QNN backend.
+    NOTE: Quantization is DISABLED for the vision encoder.
+    Testing showed that even 16a16w quantization causes severe range compression
+    (FP32 [-9.9, 3.5] -> QDQ [-3.5, 1.6], max_diff=8.15, 73.91% differ by >0.1).
+    FastViTHD's conv-heavy architecture with reparameterized BatchNorm layers
+    appears incompatible with QNN's PTQ approach.
+
+    FP16 mode is slower but produces correct results.
     """
 
     encoder_class = FastVLMVisionEncoder
@@ -114,7 +120,6 @@ class FastVLMEncoder(VisionModalityConfig):
     img_resized_h = 1024
     img_resized_w = 1024
     img_url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-    # Disable quantization for vision encoder - quantization causes numerical issues
-    # The vision encoder produces different output at QNN runtime vs compile-time when quantized
-    # FP16 mode is slower but produces correct results
+    # DISABLED: Quantization causes severe numerical errors in FastViTHD
+    # See debug output: FP32 [-9.9, 3.5] -> QDQ [-3.5, 1.6], max_diff=8.15
     quant_recipe = None

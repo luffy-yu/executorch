@@ -1183,6 +1183,7 @@ class Modality(Component):
         with torch.no_grad():
             # Generate intermediate outputs for downstream modalities (e.g., text decoder)
             # even if quantization is skipped
+            fp32_outputs = []  # Store FP32 outputs for later comparison
             intermediate_outputs = []
             for idx, data in enumerate(request_data.calibration_data.datasets):
                 # DEBUG: Save vision encoder input for comparison with runtime
@@ -1205,9 +1206,11 @@ class Modality(Component):
                     output_tensor = output[0] if isinstance(output, tuple) else output
                     output_np = output_tensor.cpu().numpy()
                     output_np.tofile(f"{debug_dir}/debug_compile_vision_output_{idx}.raw")
-                    print(f"[DEBUG] Compile vision encoder output {idx}: shape={output_tensor.shape}, "
+                    print(f"[DEBUG] Compile FP32 vision output {idx}: shape={output_tensor.shape}, "
                           f"dtype={output_tensor.dtype}, range=[{output_tensor.min().item():.4f}, {output_tensor.max().item():.4f}], "
                           f"mean={output_tensor.mean().item():.4f}, std={output_tensor.std().item():.4f}")
+                    # Store FP32 output for later comparison
+                    fp32_outputs.append(output_tensor.clone())
 
                 intermediate_outputs.append(
                     (output,) if isinstance(output, torch.Tensor) else output
@@ -1221,14 +1224,30 @@ class Modality(Component):
 
             self.model = torch.export.export(self.model, self.example_input).module()
 
+            # DEBUG: Analyze graph ops before quantization
+            if self.modality == VISION_ENCODER:
+                op_counts = {}
+                for node in self.model.graph.nodes:
+                    if node.op == "call_function":
+                        op_name = str(node.target).split('.')[-1]
+                        op_counts[op_name] = op_counts.get(op_name, 0) + 1
+                logging.info(f"[{self.modality}] Graph ops before quantization:")
+                for op, count in sorted(op_counts.items(), key=lambda x: -x[1])[:15]:
+                    logging.info(f"  {op}: {count}")
+
             quantizer = make_quantizer()
             quantizer.recipe = self.quant_recipe
             self.model = prepare_pt2e(self.model, quantizer)
 
             # calibration - re-run to get outputs from prepared model
             intermediate_outputs = []
-            for data in request_data.calibration_data.datasets:
+            for idx, data in enumerate(request_data.calibration_data.datasets):
                 output = self.model(*self.preprocess(data))
+                if self.modality == VISION_ENCODER:
+                    output_tensor = output[0] if isinstance(output, tuple) else output
+                    print(f"[DEBUG] Prepared (observer) vision output {idx}: "
+                          f"range=[{output_tensor.min().item():.4f}, {output_tensor.max().item():.4f}], "
+                          f"mean={output_tensor.mean().item():.4f}, std={output_tensor.std().item():.4f}")
                 intermediate_outputs.append(
                     (output,) if isinstance(output, torch.Tensor) else output
                 )
@@ -1239,8 +1258,13 @@ class Modality(Component):
 
             # Always collect and compare QDQ outputs to verify quantization quality
             qdq_intermediate_outputs = []
-            for data in request_data.calibration_data.datasets:
+            for idx, data in enumerate(request_data.calibration_data.datasets):
                 output = self.model(*self.preprocess(data))
+                if self.modality == VISION_ENCODER:
+                    output_tensor = output[0] if isinstance(output, tuple) else output
+                    print(f"[DEBUG] QDQ vision output {idx}: "
+                          f"range=[{output_tensor.min().item():.4f}, {output_tensor.max().item():.4f}], "
+                          f"mean={output_tensor.mean().item():.4f}, std={output_tensor.std().item():.4f}")
                 qdq_intermediate_outputs.append(
                     (output,) if isinstance(output, torch.Tensor) else output
                 )
@@ -1249,13 +1273,37 @@ class Modality(Component):
                 qdq_intermediate_outputs
             )
 
-            # Compare pre-quantization vs post-quantization outputs
+            # Compare FP32 vs QDQ outputs (the real quantization error)
+            if self.modality == VISION_ENCODER and fp32_outputs and qdq_intermediate_outputs:
+                logging.info(f"[{self.modality}] ===== QUANTIZATION ERROR ANALYSIS =====")
+                for i, (fp32, qdq) in enumerate(zip(fp32_outputs, qdq_intermediate_outputs)):
+                    qdq_tensor = qdq[0] if isinstance(qdq, tuple) else qdq
+                    diff = (fp32 - qdq_tensor).abs()
+                    max_diff = diff.max().item()
+                    mean_diff = diff.mean().item()
+                    pct_gt_01 = 100 * (diff > 0.1).sum().item() / diff.numel()
+                    pct_gt_1 = 100 * (diff > 1.0).sum().item() / diff.numel()
+
+                    logging.info(f"  Sample {i} FP32 vs QDQ:")
+                    logging.info(f"    FP32:  range=[{fp32.min().item():.4f}, {fp32.max().item():.4f}], mean={fp32.mean().item():.4f}")
+                    logging.info(f"    QDQ:   range=[{qdq_tensor.min().item():.4f}, {qdq_tensor.max().item():.4f}], mean={qdq_tensor.mean().item():.4f}")
+                    logging.info(f"    Diff:  max={max_diff:.6f}, mean={mean_diff:.6f}")
+                    logging.info(f"    Diff:  {pct_gt_01:.2f}% > 0.1, {pct_gt_1:.2f}% > 1.0")
+
+                    if max_diff > 1.0:
+                        logging.warning(f"  ⚠️ LARGE QUANTIZATION ERROR! Max diff = {max_diff:.4f}")
+                    elif max_diff > 0.1:
+                        logging.info(f"  ⚠ Moderate quantization error. Max diff = {max_diff:.4f}")
+                    else:
+                        logging.info(f"  ✓ Quantization looks good. Max diff = {max_diff:.6f}")
+
+            # Compare pre-quantization vs post-quantization outputs (prepared vs QDQ)
             if intermediate_outputs and qdq_intermediate_outputs:
                 for i, (pre, post) in enumerate(zip(intermediate_outputs, qdq_intermediate_outputs)):
                     pre_tensor = pre[0] if isinstance(pre, tuple) else pre
                     post_tensor = post[0] if isinstance(post, tuple) else post
                     diff = (pre_tensor - post_tensor).abs()
-                    logging.info(f"[{self.modality}] Quantization diff sample {i}: "
+                    logging.info(f"[{self.modality}] Prepared vs QDQ sample {i}: "
                                 f"max={diff.max().item():.6f}, "
                                 f"mean={diff.mean().item():.6f}, "
                                 f"pre_range=[{pre_tensor.min().item():.4f}, {pre_tensor.max().item():.4f}], "
