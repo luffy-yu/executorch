@@ -39,7 +39,7 @@ logging.basicConfig(level=logging.INFO, format=FORMAT)
 logger = logging.getLogger(__name__)
 
 
-def export_to_vulkan(model, sample_inputs, output_path, model_name, dynamic_shapes=None):
+def export_to_vulkan(model, sample_inputs, output_path, model_name, dynamic_shapes=None, storage_type=None, op_blocklist=None):
     """
     Export a PyTorch model to Vulkan .pte file.
 
@@ -49,6 +49,8 @@ def export_to_vulkan(model, sample_inputs, output_path, model_name, dynamic_shap
         output_path: Directory to save the .pte file
         model_name: Name for the output file (without .pte extension)
         dynamic_shapes: Optional dynamic shape specifications
+        storage_type: Optional VkStorageType override (BUFFER, TEXTURE_2D, TEXTURE_3D)
+        op_blocklist: Optional list of EdgeOpOverload objects to blocklist from Vulkan
 
     Returns:
         Path to the exported .pte file
@@ -75,9 +77,19 @@ def export_to_vulkan(model, sample_inputs, output_path, model_name, dynamic_shap
         "require_dynamic_shapes": dynamic_shapes is not None,
         "skip_bool_tensors": True,  # Required for Vulkan backend
     }
+    if storage_type is not None:
+        from executorch.backends.vulkan.serialization.vulkan_graph_schema import VkStorageType
+        vulkan_options["storage_type_override"] = VkStorageType[storage_type.upper()]
+        logger.info(f"  Using storage type override: {storage_type}")
+
+    partitioner_kwargs = {}
+    if op_blocklist is not None:
+        partitioner_kwargs["operator_blocklist"] = op_blocklist
+        logger.info(f"  Blocklisting {len(op_blocklist)} ops from Vulkan delegation")
+
     edge_program = to_edge_transform_and_lower(
         exported_program,
-        partitioner=[VulkanPartitioner(vulkan_options)],
+        partitioner=[VulkanPartitioner(vulkan_options, **partitioner_kwargs)],
         compile_config=EdgeCompileConfig(_skip_dim_order=False, _check_ir_validity=False),
     )
 
@@ -96,7 +108,7 @@ def export_to_vulkan(model, sample_inputs, output_path, model_name, dynamic_shap
     return pte_path
 
 
-def export_vision_encoder(checkpoint_path, output_dir):
+def export_vision_encoder(checkpoint_path, output_dir, storage_type=None, op_blocklist=None, output_name="vision_encoder"):
     """
     Export FastVLM vision encoder to Vulkan.
 
@@ -142,7 +154,9 @@ def export_vision_encoder(checkpoint_path, output_dir):
         vision_encoder,
         sample_inputs,
         output_dir,
-        "vision_encoder",
+        output_name,
+        storage_type=storage_type,
+        op_blocklist=op_blocklist,
     )
 
     return pte_path
@@ -281,6 +295,29 @@ def main():
         default=896,
         help="Hidden dimension size",
     )
+    parser.add_argument(
+        "--storage_type",
+        type=str,
+        default=None,
+        choices=["buffer", "texture_2d", "texture_3d"],
+        help="Vulkan storage type override (default: texture_3d). "
+        "Use 'buffer' or 'texture_2d' to work around Adreno shader compiler crashes.",
+    )
+    parser.add_argument(
+        "--op_blocklist",
+        type=str,
+        default=None,
+        help="Comma-separated list of ops to blocklist from Vulkan delegation. "
+        "Blocklisted ops fall back to CPU. "
+        "Format: aten.mean.dim,aten.softmax.int "
+        "Use this to work around Adreno shader compiler crashes for specific ops.",
+    )
+    parser.add_argument(
+        "--output_name",
+        type=str,
+        default="vision_encoder",
+        help="Name for the output .pte file (without extension)",
+    )
 
     args = parser.parse_args()
 
@@ -293,11 +330,33 @@ def main():
         logger.error(f"Checkpoint not found: {args.checkpoint}")
         sys.exit(1)
 
+    # Parse op blocklist
+    op_blocklist = None
+    if args.op_blocklist:
+        from executorch.exir.dialects._ops import ops as exir_ops
+        op_blocklist = []
+        for name in args.op_blocklist.split(","):
+            name = name.strip()
+            # Format: aten.op_name.overload
+            parts = name.replace("aten.", "").split(".")
+            try:
+                edge_op = getattr(getattr(exir_ops.edge.aten, parts[0]), parts[1] if len(parts) > 1 else "default")
+                op_blocklist.append(edge_op)
+                logger.info(f"  Blocklisting: {name} -> {edge_op}")
+            except AttributeError:
+                logger.warning(f"  Could not resolve edge op: {name}")
+        logger.info(f"Total ops blocklisted: {len(op_blocklist)}")
+
     exported_files = []
 
     # Export vision encoder
     try:
-        pte_path = export_vision_encoder(args.checkpoint, args.output_dir)
+        pte_path = export_vision_encoder(
+            args.checkpoint, args.output_dir,
+            storage_type=args.storage_type,
+            op_blocklist=op_blocklist,
+            output_name=args.output_name,
+        )
         exported_files.append(pte_path)
     except Exception as e:
         logger.error(f"Failed to export vision encoder: {e}")
