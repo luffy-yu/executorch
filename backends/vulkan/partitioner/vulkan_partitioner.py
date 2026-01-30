@@ -253,6 +253,20 @@ class VulkanSupportedOperators(OperatorSupportBase):
             self.log_skip(node, "no dynamic shape support")
             return False
 
+        # Check buffer limit for output tensors
+        if utils.is_tensor_node(node) and not utils.within_buffer_limit(
+            node, self.buffer_limit
+        ):
+            self.log_skip(node, "output tensor exceeds buffer limit")
+            return False
+
+        # Check buffer limit for input tensors (e.g. large weight matrices)
+        for arg in node.args:
+            if isinstance(arg, torch.fx.Node) and utils.is_tensor_node(arg):
+                if not utils.within_buffer_limit(arg, self.buffer_limit):
+                    self.log_skip(node, "input tensor exceeds buffer limit")
+                    return False
+
         is_compatible, reason = self.node_is_compatible(node, features=features)
         if not is_compatible:
             self.log_skip(node, reason)

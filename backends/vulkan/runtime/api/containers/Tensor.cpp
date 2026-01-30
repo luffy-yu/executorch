@@ -561,10 +561,21 @@ vkapi::VulkanBuffer allocate_buffer(
       return vkapi::VulkanBuffer();
   }
 
-  VK_CHECK_COND(numel <= context_ptr->adapter_ptr()->max_buffer_numel());
+  const int64_t buffer_bytes = element_size(dtype) * numel;
+  const int64_t max_bytes =
+      static_cast<int64_t>(context_ptr->adapter_ptr()->max_buffer_numel());
+  VK_CHECK_COND(
+      buffer_bytes <= max_bytes,
+      "Buffer allocation of ",
+      buffer_bytes,
+      " bytes (",
+      numel,
+      " elements x ",
+      element_size(dtype),
+      " bytes) exceeds maxStorageBufferRange=",
+      max_bytes);
 
-  return adapter_ptr->vma().create_storage_buffer(
-      element_size(dtype) * numel, allocate_memory);
+  return adapter_ptr->vma().create_storage_buffer(buffer_bytes, allocate_memory);
 }
 
 vTensorStorage::vTensorStorage(
