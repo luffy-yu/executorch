@@ -501,12 +501,20 @@ class TextDecoder(Component):
             # FastVLM uses custom architecture that can't be loaded with AutoModel
             # For VLMs, we get embeddings from the local checkpoint instead
             if "fastvlm" in self.config.repo_id.lower() or "FastVLM" in self.config.repo_id:
-                # Load embeddings from local checkpoint
+                # Load embeddings from checkpoint (local or HuggingFace)
                 import os
                 from safetensors.torch import load_file
 
-                # Use local checkpoint from ml-fastvlm repository
-                safetensor_path = os.path.join(self.config.repo_id, "model.safetensors")
+                repo_id = self.config.repo_id
+                if os.path.isdir(repo_id):
+                    safetensor_path = os.path.join(repo_id, "model.safetensors")
+                elif os.path.isfile(repo_id):
+                    safetensor_path = repo_id
+                else:
+                    from huggingface_hub import snapshot_download
+                    local_dir = snapshot_download(repo_id)
+                    safetensor_path = os.path.join(local_dir, "model.safetensors")
+
                 if os.path.exists(safetensor_path):
                     checkpoint = load_file(safetensor_path)
                     embed_weights = checkpoint.get("model.embed_tokens.weight", None)
@@ -1116,13 +1124,19 @@ class Modality(Component):
             # FastVLM uses custom vision encoder that can't be loaded via AutoModel
             # Load weights directly from local checkpoint instead
             if "fastvlm" in repo_id.lower() or "FastVLM" in repo_id:
-                # FastVLM: load vision encoder with checkpoint from repo_id (local directory)
+                # FastVLM: load vision encoder with checkpoint
                 import os
 
-                # repo_id for FastVLM points to local checkpoint directory
-                checkpoint_path = repo_id
-                if os.path.isdir(checkpoint_path):
-                    checkpoint_path = os.path.join(checkpoint_path, "model.safetensors")
+                # If repo_id is a local directory, use it directly;
+                # otherwise download from HuggingFace
+                if os.path.isdir(repo_id):
+                    checkpoint_path = os.path.join(repo_id, "model.safetensors")
+                elif os.path.isfile(repo_id):
+                    checkpoint_path = repo_id
+                else:
+                    from huggingface_hub import snapshot_download
+                    local_dir = snapshot_download(repo_id)
+                    checkpoint_path = os.path.join(local_dir, "model.safetensors")
 
                 # Create encoder directly without HuggingFace model
                 self.model = config().create_encoder(None, checkpoint_path=checkpoint_path)
